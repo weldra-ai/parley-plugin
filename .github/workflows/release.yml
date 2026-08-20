@@ -12,15 +12,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           ref: ${{ github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.13.0
           cache: pnpm
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - run: corepack enable
@@ -42,6 +42,11 @@ jobs:
           trap 'rm -rf "${GNUPGHOME}"' EXIT
           chmod 700 "${GNUPGHOME}"
           printf '%s\n' "${PARLEY_RELEASE_SIGNER_PUBLIC_KEY}" | gpg --batch --homedir "${GNUPGHOME}" --import >/dev/null
+          secret_key_records="$(gpg --batch --homedir "${GNUPGHOME}" --with-colons --list-secret-keys)"
+          if printf '%s\n' "${secret_key_records}" | awk -F: '$1 == "sec" || $1 == "ssb" { found = 1 } END { exit(found ? 0 : 1) }'; then
+            echo "Configured signer public key must not contain private-key material."
+            exit 1
+          fi
           expected_fingerprint="$(printf '%s' "${PARLEY_RELEASE_SIGNER_FINGERPRINT}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
           if ! [[ "${expected_fingerprint}" =~ ^([A-F0-9]{40}|[A-F0-9]{64})$ ]]; then
             echo "Configured signer fingerprint must be a 40- or 64-character hexadecimal fingerprint."

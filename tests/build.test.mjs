@@ -520,7 +520,7 @@ test("CI installs pinned native validators before pnpm validate", async () => {
   const validatorGate = await readFile(join(repositoryRoot, "scripts", "validate.mjs"), "utf8");
   assert.equal(packageJson.devDependencies["@anthropic-ai/claude-code"], "2.1.237");
   assert.equal(packageJson.devDependencies["@google/gemini-cli"], "0.56.0");
-  assert.match(ci, /actions\/setup-python@v5/);
+  assert.match(ci, /actions\/setup-python@[0-9a-f]{40} # v5/);
   assert.match(ci, /python -m pip install --disable-pip-version-check -r tools\/codex-plugin-validator\/requirements\.txt/);
   assert.match(ci, /pnpm validate/);
   assert.match(validatorGate, /await runNativeValidators\(\{ outputDir: join\(projectRoot\(\), "dist"\) \}\)/);
@@ -549,4 +549,37 @@ test("release imports and constrains the configured signer before verifying the 
   assert.ok(release.indexOf('test "${actual_fingerprint_count}" = "1"') < release.indexOf('git verify-tag "${tag}"'));
   assert.match(readme, /PARLEY_RELEASE_SIGNER_PUBLIC_KEY/);
   assert.match(readme, /PARLEY_RELEASE_SIGNER_FINGERPRINT/);
+});
+
+test("release rejects private-key material in the configured public signer variable before tag verification", async () => {
+  const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+  const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");
+
+  assert.match(release, /--with-colons --list-secret-keys/);
+  assert.match(release, /\$1 == "sec" \|\| \$1 == "ssb"/);
+  assert.match(release, /Configured signer public key must not contain private-key material/);
+  assert.ok(release.indexOf('--import >/dev/null') < release.indexOf('--list-secret-keys'));
+  assert.ok(release.indexOf('--list-secret-keys') < release.indexOf('actual_fingerprints'));
+  assert.ok(release.indexOf('--list-secret-keys') < release.indexOf('git verify-tag "${tag}"'));
+  assert.match(readme, /must not contain private-key material/i);
+});
+
+test("CI and release pin every required GitHub Action to the resolved immutable commit", async () => {
+  const expectedPins = new Map([
+    ["actions/checkout", { sha: "11d5960a326750d5838078e36cf38b85af677262", version: "v4" }],
+    ["actions/setup-node", { sha: "49933ea5288caeca8642d1e84afbd3f7d6820020", version: "v4" }],
+    ["actions/setup-python", { sha: "a26af69be951a213d495a4c3e4e4022e16d87065", version: "v5" }],
+  ]);
+
+  for (const workflowName of ["ci.yml", "release.yml"]) {
+    const workflow = await readFile(join(repositoryRoot, ".github", "workflows", workflowName), "utf8");
+    const actionUses = [...workflow.matchAll(/^\s*- uses:\s+(actions\/[^@\s]+)@([^\s#]+)(?:\s+#\s*([^\r\n]+))?$/gm)];
+    assert.deepEqual(actionUses.map((match) => match[1]).sort(), [...expectedPins.keys()].sort());
+
+    for (const [, action, ref, comment] of actionUses) {
+      assert.match(ref, /^[0-9a-f]{40}$/);
+      assert.equal(ref, expectedPins.get(action).sha);
+      assert.equal(comment, expectedPins.get(action).version);
+    }
+  }
 });

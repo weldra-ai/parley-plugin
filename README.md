@@ -28,10 +28,10 @@ The build produces three versioned ZIP artifacts, their SHA-256 checksum files, 
 
 The release workflow accepts only an annotated `v${package.version}` tag signed by the configured public key. Before enabling releases, add these repository **Variables** (not secrets):
 
-- `PARLEY_RELEASE_SIGNER_PUBLIC_KEY`: the ASCII-armored public verification key.
+- `PARLEY_RELEASE_SIGNER_PUBLIC_KEY`: public verification key material only (ASCII-armored); it must not contain private-key material.
 - `PARLEY_RELEASE_SIGNER_FINGERPRINT`: the authorized primary-key fingerprint (40-character v4 or 64-character v5 hexadecimal); whitespace and case are normalized before an exact comparison.
 
-The workflow imports that public key into an isolated temporary GnuPG home, rejects key blobs with anything other than exactly one primary fingerprint, requires that fingerprint to match, and then runs `git verify-tag`. Never store a private key in this repository, its variables, or GitHub Actions.
+The workflow imports that public key into an isolated temporary GnuPG home, rejects any imported private-key record or anything other than exactly one primary fingerprint, requires that fingerprint to match, and then runs `git verify-tag`. Never store private-key material in this repository, its variables, or GitHub Actions.
 
 ## Compatibility status
 
