@@ -15,14 +15,14 @@
       }
     },
     "claude": {
-      "testedVersions": [],
+      "testedVersions": ["2.1.193", "2.1.195", "2.1.237"],
       "operatingSystems": ["windows", "macos", "linux"],
-      "authModes": ["oauth"],
+      "authModes": ["oauth", "manual"],
       "minimumSupport": {
         "minimumVersion": null,
         "enforcedBy": "omitting/disabling capability",
         "capability": "host-specific lifecycle automation",
-        "certification": "pending"
+        "certification": "2.1.193 transport-only certification uses the explicit-space fallback; 2.1.195 invokes headersHelper; 2.1.237 certifies OAuth and manual override routing"
       }
     },
     "gemini": {

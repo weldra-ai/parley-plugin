@@ -13,7 +13,7 @@ import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOSTS = ["codex", "claude", "gemini"];
-export const SHARED_PATHS = ["commands", "hooks", "skills/parley"];
+export const SHARED_PATHS = ["commands", "hooks", "scripts", "skills/parley"];
 
 const ZIP_EPOCH = 315532800;
 const REQUIRED_MANIFESTS = {

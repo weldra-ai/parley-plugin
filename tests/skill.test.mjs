@@ -9,6 +9,7 @@ const sharedWorkflowPaths = [
   "skills/parley/SKILL.md",
   "hooks/session-reminder.mjs",
   "hooks/manual-unread.mjs",
+  "scripts/managed-config.mjs",
   "commands/connect.md",
   "commands/connect-manual.md",
   "commands/status.md",
@@ -23,6 +24,15 @@ test("shared Parley skill has discriminating frontmatter without copied tool sch
   assert.match(frontmatter[1], /^name:\s*parley\s*$/m);
   assert.match(frontmatter[1], /^description:\s*Use when\b/m);
   assert.doesNotMatch(skill, /\b(?:inputSchema|outputSchema|properties)\s*:/);
+});
+
+test("shared Parley skill retries lower-capability space-aware calls only after SPACE_REQUIRED", async () => {
+  const skill = await readFile("shared/skills/parley/SKILL.md", "utf8");
+
+  assert.match(skill, /SPACE_REQUIRED[\s\S]{0,220}side-effect-free/i);
+  assert.match(skill, /resolve Git context[\s\S]{0,180}retry that same call[\s\S]{0,120}explicit `space`/i);
+  assert.match(skill, /explicit `space`[\s\S]{0,180}(?:rest|remainder) of the session/i);
+  assert.match(skill, /literal `main` only after positively proving this repository has no remotes/i);
 });
 
 test("build materializes the complete shared workflow into every native artifact", async () => {

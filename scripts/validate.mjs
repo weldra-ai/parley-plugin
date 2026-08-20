@@ -17,6 +17,15 @@ const ENFORCEMENT_MODES = new Set([
   "omitting/disabling capability",
 ]);
 export const TRUSTED_MCP_ORIGIN = "https://parley.weldra.dev/mcp";
+const CLAUDE_HEADERS_HELPER = "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\"";
+const FORBIDDEN_AUTH_HEADER_NAMES = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-api-key",
+  "x-auth-token",
+  "x-access-token",
+]);
 
 function projectRoot() {
   return dirname(dirname(fileURLToPath(import.meta.url)));
@@ -56,9 +65,15 @@ function assertOneParleyServer(servers, canonicalOrigin, label) {
   if (endpoint !== canonicalOrigin) {
     throw new Error(`${label} must use the canonical MCP origin.`);
   }
-  if (server.headers?.Authorization) {
-    throw new Error(`${label} must use OAuth lifecycle mode without a static bearer header.`);
+  if (server.headers !== undefined) {
+    const headers = assertObject(server.headers, `${label} headers`);
+    for (const name of Object.keys(headers)) {
+      if (FORBIDDEN_AUTH_HEADER_NAMES.has(name.toLowerCase())) {
+        throw new Error(`${label} must use OAuth lifecycle mode without a static bearer header.`);
+      }
+    }
   }
+  return server;
 }
 
 function validateCodex(files, canonicalOrigin, version) {
@@ -81,7 +96,43 @@ function validateClaude(files, canonicalOrigin, version) {
   ) {
     throw new Error("Claude native manifest is invalid.");
   }
-  assertOneParleyServer(mcp.mcpServers, canonicalOrigin, "Claude artifact");
+  if (Object.hasOwn(manifest, "userConfig")) {
+    throw new Error("Claude OAuth artifact must not declare userConfig credentials.");
+  }
+  const server = assertOneParleyServer(mcp.mcpServers, canonicalOrigin, "Claude artifact");
+  if (server.headersHelper !== CLAUDE_HEADERS_HELPER) {
+    throw new Error("Claude headersHelper must be the bundled space-only helper.");
+  }
+  const helper = files.get("scripts/space-headers.mjs");
+  if (helper === undefined || /authorization/i.test(helper.toString("utf8"))) {
+    throw new Error("Claude headersHelper must not emit Authorization.");
+  }
+  if (files.get("scripts/managed-config.mjs") === undefined) {
+    throw new Error("Claude artifact must include the shared manual configuration manager.");
+  }
+  const hooks = parseJson(files.get("hooks/hooks.json"), "Claude hooks manifest");
+  const hookGroups = assertObject(hooks.hooks, "Claude hooks");
+  const sessionStart = hookGroups.SessionStart;
+  if (
+    Object.keys(hookGroups).length !== 1 ||
+    !Array.isArray(sessionStart) ||
+    sessionStart.length !== 1 ||
+    !Array.isArray(sessionStart[0]?.hooks) ||
+    sessionStart[0].hooks.length !== 1
+  ) {
+    throw new Error("Claude artifact must declare only its SessionStart reminder hook.");
+  }
+  const reminder = sessionStart[0].hooks[0];
+  if (
+    reminder?.type !== "command" ||
+    reminder.command !== "node" ||
+    !Array.isArray(reminder.args) ||
+    reminder.args.length !== 1 ||
+    reminder.args[0] !== "${CLAUDE_PLUGIN_ROOT}/hooks/session-reminder.mjs" ||
+    reminder.timeout !== 3
+  ) {
+    throw new Error("Claude SessionStart reminder hook is invalid.");
+  }
 }
 
 function validateGemini(files, canonicalOrigin, version) {
@@ -220,7 +271,9 @@ export async function validateArtifacts({
     throw new Error("package.json must provide a version.");
   }
   const sourceSkillHash = hash(await readFile(join(root, "shared", "skills", "parley", "SKILL.md")));
+  const sourceManualConfigHash = hash(await readFile(join(root, "shared", "scripts", "managed-config.mjs")));
   const skillHashes = [];
+  const manualConfigHashes = [];
 
   for (const host of HOSTS) {
     const archiveName = `parley-${host}-${version}.zip`;
@@ -239,9 +292,17 @@ export async function validateArtifacts({
     NATIVE_VALIDATORS[host](files, canonicalOrigin, version);
     await assertMaterializedParity(outputDir, host, files);
     skillHashes.push(hash(files.get("skills/parley/SKILL.md")));
+    const manualConfig = files.get("scripts/managed-config.mjs");
+    if (manualConfig === undefined) {
+      throw new Error(`${host} artifact is missing the shared manual configuration manager.`);
+    }
+    manualConfigHashes.push(hash(manualConfig));
   }
   if (!skillHashes.every((candidate) => candidate === sourceSkillHash)) {
     throw new Error("Native artifacts do not share the canonical skill hash.");
+  }
+  if (!manualConfigHashes.every((candidate) => candidate === sourceManualConfigHash)) {
+    throw new Error("Native artifacts do not share the canonical shared manual configuration manager.");
   }
   return { version, skillSha256: sourceSkillHash };
 }

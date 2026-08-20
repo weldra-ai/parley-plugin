@@ -26,6 +26,7 @@ import { runNativeValidators } from "../scripts/native-validate.mjs";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
+const claudeHeadersHelper = "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\"";
 const skill = "---\nname: parley\ndescription: Shared Parley workflow seed.\n---\n\nConnect to Parley.\n";
 const secretPrefixes = ["pn", "pa", "pr", "pc", "or", "wh", "evk"];
 const publicIdentifierPrefixes = ["oc", "ac", "rf"];
@@ -111,8 +112,28 @@ async function makeFixture() {
   await writeJson(join(hosts, "codex", ".codex-plugin", "plugin.json"), pluginManifest());
   await writeJson(join(hosts, "claude", ".claude-plugin", "plugin.json"), claudeManifest());
   await writeJson(join(hosts, "claude", ".mcp.json"), {
-    mcpServers: { parley: { type: "http", url: canonicalOrigin } },
+    mcpServers: {
+      parley: {
+        type: "http",
+        url: canonicalOrigin,
+        headersHelper: claudeHeadersHelper,
+      },
+    },
   });
+  await writeJson(join(hosts, "claude", "hooks", "hooks.json"), {
+    hooks: {
+      SessionStart: [{
+        hooks: [{
+          type: "command",
+          command: "node",
+          args: ["${CLAUDE_PLUGIN_ROOT}/hooks/session-reminder.mjs"],
+          timeout: 3,
+        }],
+      }],
+    },
+  });
+  await mkdir(join(hosts, "claude", "scripts"), { recursive: true });
+  await writeFile(join(hosts, "claude", "scripts", "space-headers.mjs"), "process.stdout.write('{}\\n');\n");
   await writeJson(join(hosts, "gemini", "gemini-extension.json"), geminiManifest());
   const skillPath = join(shared, "skills", "parley", "SKILL.md");
   await mkdir(dirname(skillPath), { recursive: true });
@@ -121,6 +142,8 @@ async function makeFixture() {
   await writeFile(join(shared, "commands", "connect.md"), "Connect to Parley.\n");
   await mkdir(join(shared, "hooks"), { recursive: true });
   await writeFile(join(shared, "hooks", "session-reminder.mjs"), "process.exit(0);\n");
+  await mkdir(join(shared, "scripts"), { recursive: true });
+  await writeFile(join(shared, "scripts", "managed-config.mjs"), "export {};\n");
   return root;
 }
 

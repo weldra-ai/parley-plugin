@@ -19,7 +19,12 @@ Before choosing a space, run `git remote -v` and resolve the repository's raw re
 First determine the connection mode:
 
 - With a host-pinned `X-Space`, omit redundant `space` arguments.
-- Without that header, pass the resolved raw remote explicitly on every space-aware call.
+- If the first space-aware call returns `SPACE_REQUIRED`, treat that as a side-effect-free control
+  response: it has not read, acknowledged, written, or claimed anything. Resolve Git context, then
+  retry that same call with explicit `space` set to the raw remote (or proven `main`). Use explicit
+  `space` on every later space-aware call for the rest of the session.
+- If the host exposes no pinned context before a call, resolve Git context first and pass that explicit
+  `space`; never guess from a local path or a repository name.
 - Use literal `main` only after positively proving this repository has no remotes. An ambiguous or
   failed Git result is not proof of `main`.
 
