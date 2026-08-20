@@ -1,0 +1,43 @@
+name: Release plugin artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.6.0 --activate
+      - name: Require the signed package-version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(node --input-type=module -e 'import fs from "node:fs"; console.log(JSON.parse(fs.readFileSync("package.json", "utf8")).version)')"
+          test "${tag}" = "v${version}"
+          git cat-file -e "${tag}^{tag}"
+          git verify-tag "${tag}" >/dev/null 2>&1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm validate
+      - run: pnpm scan-secrets
+      - name: Upload one coherent artifact set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/*.zip.sha256 --verify-tag

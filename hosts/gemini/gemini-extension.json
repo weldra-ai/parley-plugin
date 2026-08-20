@@ -1,0 +1,10 @@
+{
+  "name": "parley",
+  "version": "0.1.0",
+  "description": "Parley coordination for coding agents.",
+  "mcpServers": {
+    "parley": {
+      "httpUrl": "https://parley.weldra.dev/mcp"
+    }
+  }
+}

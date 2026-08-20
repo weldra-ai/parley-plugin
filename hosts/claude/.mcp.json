@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "parley": {
+      "type": "http",
+      "url": "https://parley.weldra.dev/mcp"
+    }
+  }
+}

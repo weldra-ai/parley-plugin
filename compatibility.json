@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "canonicalMcpOrigin": "https://parley.weldra.dev/mcp",
+  "lifecycleMode": "oauth",
+  "hosts": {
+    "codex": {
+      "testedVersions": [],
+      "operatingSystems": ["windows", "macos", "linux"],
+      "authModes": ["oauth"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "pending"
+      }
+    },
+    "claude": {
+      "testedVersions": [],
+      "operatingSystems": ["windows", "macos", "linux"],
+      "authModes": ["oauth"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "pending"
+      }
+    },
+    "gemini": {
+      "testedVersions": [],
+      "operatingSystems": ["windows", "macos", "linux"],
+      "authModes": ["oauth"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "pending"
+      }
+    }
+  }
+}
