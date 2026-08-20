@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -318,10 +318,166 @@ test("Claude manager leaves no bearer temporary file when post-promotion cleanup
       }),
       /safely restore|temporary cleanup/i,
     );
-    assert.equal(cleanupCalls, 3, "the injected failure must occur after the direct config promotion");
+    assert.ok(cleanupCalls >= 3, "the injected failure must occur after atomic config promotion");
     assert.deepEqual(await readFile(configPath), originalConfig);
     const leftovers = await temporaryFiles(root);
     assert.equal(leftovers.length, 0, "a cleanup failure after config promotion must not retain a bearer temporary");
+  });
+});
+
+test("Claude config stages a bearer at 0600 before replacing a permissive profile", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const token = runtimeSentinel("c");
+    const original = await readFile(configPath);
+    await chmod(configPath, 0o666);
+    let staged = false;
+    await applyClaudeManual({
+      profileDir,
+      token,
+      helperSourcePath,
+      canonicalOrigin,
+      configFileOps: {
+        onStaged: async ({ temporary, target, mode }) => {
+          staged = true;
+          assert.equal(target, configPath);
+          assert.equal(mode, 0o600);
+          assert.deepEqual(await readFile(target), original);
+          assert.doesNotMatch(await readFile(target, "utf8"), new RegExp(token));
+          if (process.platform !== "win32") {
+            assert.equal((await lstat(temporary)).mode & 0o077, 0);
+          }
+        },
+      },
+    });
+    assert.equal(staged, true);
+    if (process.platform !== "win32") {
+      assert.equal((await lstat(configPath)).mode & 0o077, 0);
+    }
+  });
+});
+
+test("Claude config preserves original bytes after partial staging and interrupted promotion", async () => {
+  for (const [name, configFileOps] of [
+    [
+      "partial staging write",
+      {
+        temporaryWriter: async (handle, bytes) => {
+          await handle.write(bytes.subarray(0, 12));
+          throw new Error("Injected partial config write failure.");
+        },
+      },
+    ],
+    [
+      "interrupted promotion",
+      {
+        promoter: async () => {
+          throw new Error("Injected config promotion interruption.");
+        },
+      },
+    ],
+  ]) {
+    await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
+      const original = await readFile(configPath);
+      await assert.rejects(
+        applyClaudeManual({
+          profileDir,
+          token: runtimeSentinel("d"),
+          helperSourcePath,
+          canonicalOrigin,
+          configFileOps,
+        }),
+        /partial config write|promotion interruption/i,
+        name,
+      );
+      assert.deepEqual(await readFile(configPath), original, name);
+      assert.equal((await temporaryFiles(root)).length, 0, name);
+    });
+  }
+});
+
+test("Claude config scrubs a retained staging file before a cleanup failure", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const token = runtimeSentinel("e");
+    const originalToken = runtimeSentinel("h");
+    await applyClaudeManual({ profileDir, token: originalToken, helperSourcePath, canonicalOrigin });
+    const original = await readFile(configPath);
+    let retainedTemporary = null;
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token,
+        helperSourcePath,
+        canonicalOrigin,
+        configFileOps: {
+          temporaryWriter: async (handle, bytes) => {
+            await handle.write(bytes);
+            throw new Error("Injected config write failure.");
+          },
+          temporaryRemover: async (path) => {
+            retainedTemporary = path;
+            throw new Error("Injected config cleanup failure.");
+          },
+        },
+      }),
+      /safely restore|config cleanup/i,
+    );
+    assert.notEqual(retainedTemporary, null);
+    const residue = await readFile(retainedTemporary);
+    assert.equal(residue.byteLength, 0);
+    assert.doesNotMatch(residue.toString("utf8"), new RegExp(token));
+    assert.doesNotMatch(residue.toString("utf8"), new RegExp(originalToken));
+    assert.deepEqual(await readFile(configPath), original);
+  });
+});
+
+test("Claude rollback restores config, changed helper, and distinct sidecar after one restoration cleanup failure", async () => {
+  await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
+    await writeFile(helperSourcePath, "original helper bytes\n");
+    const paths = await applyClaudeManual({
+      profileDir,
+      token: runtimeSentinel("f"),
+      helperSourcePath,
+      canonicalOrigin,
+    });
+    const sidecar = JSON.parse(await readFile(paths.sidecarPath, "utf8"));
+    sidecar.marker = "original-sidecar-bytes";
+    const originalSidecar = Buffer.from(`${JSON.stringify(sidecar, null, 2)}\n`);
+    await writeFile(paths.sidecarPath, originalSidecar);
+    const originalConfig = await readFile(configPath);
+    const originalHelper = await readFile(paths.helperPath);
+    await writeFile(helperSourcePath, "changed helper bytes\n");
+
+    let cleanupCalls = 0;
+    const temporaryRemover = async (path, options = {}) => {
+      cleanupCalls += 1;
+      const failingHelperRestore = options.targetPath === paths.helperPath
+        ? cleanupCalls > 1
+        : options.targetPath === undefined && cleanupCalls === 3;
+      if (failingHelperRestore) {
+        throw new Error("Injected helper restoration cleanup failure.");
+      }
+      await rm(path, { force: true });
+    };
+
+    const attemptedToken = runtimeSentinel("g");
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: attemptedToken,
+        helperSourcePath,
+        canonicalOrigin,
+        failAt: "validation",
+        temporaryRemover,
+      }),
+      /safely restore/i,
+    );
+    assert.deepEqual(await readFile(configPath), originalConfig);
+    assert.deepEqual(await readFile(paths.helperPath), originalHelper);
+    assert.deepEqual(await readFile(paths.sidecarPath), originalSidecar);
+    for (const path of await temporaryFiles(root)) {
+      const residue = await readFile(path, "utf8");
+      assert.doesNotMatch(residue, new RegExp(attemptedToken));
+    }
   });
 });
 
