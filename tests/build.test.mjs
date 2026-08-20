@@ -117,6 +117,10 @@ async function makeFixture() {
   const skillPath = join(shared, "skills", "parley", "SKILL.md");
   await mkdir(dirname(skillPath), { recursive: true });
   await writeFile(skillPath, skill);
+  await mkdir(join(shared, "commands"), { recursive: true });
+  await writeFile(join(shared, "commands", "connect.md"), "Connect to Parley.\n");
+  await mkdir(join(shared, "hooks"), { recursive: true });
+  await writeFile(join(shared, "hooks", "session-reminder.mjs"), "process.exit(0);\n");
   return root;
 }
 
