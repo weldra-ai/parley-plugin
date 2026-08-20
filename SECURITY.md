@@ -4,6 +4,8 @@ Do not place Parley credentials, OAuth codes, bearer tokens, repository remotes,
 
 `pnpm scan-secrets` fails closed when it finds credential-like source or generated artifact material and never prints the matched value. Run it before every review and release attempt.
 
-The scanner permits only the documented examples `pn_EXAMPLE_TOKEN`, `pn_PLACEHOLDER_TOKEN`, and `pn_REDACTED_TOKEN`; none is a usable credential.
+The scanner recognizes raw manual (`pn_`), access (`pa_`), refresh (`pr_`), authorization-code (`pc_`), pending-request (`or_`), webhook (`wh_`), and email-verification (`evk_`) credential prefixes. It deliberately does not treat public OAuth-client (`oc_`), agent-connection (`ac_`), or refresh-family (`rf_`) identifiers as credentials.
+
+The scanner permits only the exact documented examples `pn_EXAMPLE_TOKEN`, `pn_PLACEHOLDER_TOKEN`, and `pn_REDACTED_TOKEN`; none is a usable credential. No broad test-token exception is allowed.
 
 Before a public release, configure a private reporting channel in the published repository's Security tab. Until that channel exists, do not disclose a suspected vulnerability or credential in a public issue.

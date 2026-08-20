@@ -9,6 +9,8 @@ const PLACEHOLDERS = new Set([
   "pn_PLACEHOLDER_TOKEN",
   "pn_REDACTED_TOKEN",
 ]);
+const SECRET_PREFIXES = ["pn", "pa", "pr", "pc", "or", "wh", "evk"];
+const PREFIXED_TOKEN_PATTERN = new RegExp(`\\b(?:${SECRET_PREFIXES.join("|")})_[A-Za-z0-9_-]+\\b`, "g");
 
 function projectRoot() {
   return dirname(dirname(fileURLToPath(import.meta.url)));
@@ -32,8 +34,7 @@ function isAllowedPlaceholder(value) {
 }
 
 function containsCredentialMaterial(text) {
-  const prefixedToken = /\b(?:pn|oauth|code)_[A-Za-z0-9_-]{16,}\b/g;
-  for (const match of text.matchAll(prefixedToken)) {
+  for (const match of text.matchAll(PREFIXED_TOKEN_PATTERN)) {
     if (!isAllowedPlaceholder(match[0])) {
       return true;
     }

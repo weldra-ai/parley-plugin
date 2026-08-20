@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename as renameFile,
   rm,
   symlink,
   writeFile,
@@ -16,14 +17,23 @@ import {
   buildArtifacts,
   readZipEntries,
   readZipText,
+  replaceMaterializedDirectory,
   writeFileAtomically,
 } from "../scripts/build.mjs";
 import { scanForSecrets } from "../scripts/scan-secrets.mjs";
 import { validateArtifacts } from "../scripts/validate.mjs";
+import { runNativeValidators } from "../scripts/native-validate.mjs";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const skill = "---\nname: parley\ndescription: Shared Parley workflow seed.\n---\n\nConnect to Parley.\n";
+const secretPrefixes = ["pn", "pa", "pr", "pc", "or", "wh", "evk"];
+const publicIdentifierPrefixes = ["oc", "ac", "rf"];
+const tokenSuffix = "K7nQg4sL2pV8xR5dZ1hM9cT6wB3yF0a";
+
+function prefixedValue(prefix) {
+  return `${prefix}_${tokenSuffix}`;
+}
 
 async function writeJson(path, value) {
   await mkdir(dirname(path), { recursive: true });
@@ -249,6 +259,35 @@ test("atomic artifact writes preserve a prior file and clean temporary output on
   }
 });
 
+test("transactional materialized-root replacement restores the complete prior root after promotion failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "parley-plugin-root-replace-"));
+  try {
+    const destination = join(root, "codex");
+    const staged = join(root, "staged-codex");
+    await mkdir(destination, { recursive: true });
+    await mkdir(staged, { recursive: true });
+    await writeFile(join(destination, "old.txt"), "previous complete root");
+    await writeFile(join(staged, "new.txt"), "replacement root");
+
+    await assert.rejects(
+      replaceMaterializedDirectory(staged, destination, {
+        rename: async (from, to) => {
+          if (from === staged && to === destination) {
+            throw new Error("simulated promotion interruption");
+          }
+          await renameFile(from, to);
+        },
+      }),
+      /simulated promotion interruption/,
+    );
+
+    assert.equal(await readFile(join(destination, "old.txt"), "utf8"), "previous complete root");
+    assert.deepEqual(await readdir(root), ["codex"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("secret scanning fails closed for source and archive credential material without echoing it", async () => {
   const secret = ["pn", "K7nQg4sL2pV8xR5dZ1hM9cT6wB3yF0a"].join("_");
   await withFixture(async (sourceDir) => {
@@ -276,6 +315,56 @@ test("secret scanning fails closed for source and archive credential material wi
   });
 });
 
+for (const prefix of secretPrefixes) {
+  test(`secret scanner catches standalone ${prefix} source tokens without echoing values`, async () => {
+    const secret = prefixedValue(prefix);
+    await withFixture(async (sourceDir) => {
+      await writeFile(join(sourceDir, "capture.log"), secret);
+      await assert.rejects(
+        scanForSecrets({ root: sourceDir }),
+        (error) => {
+          assert.doesNotMatch(error.message, new RegExp(secret));
+          return /credential/i.test(error.message);
+        },
+      );
+    });
+  });
+
+  test(`secret scanner catches standalone ${prefix} archive tokens without echoing values`, async () => {
+    const secret = prefixedValue(prefix);
+    await withFixture(async (sourceDir) => {
+      const skillPath = join(sourceDir, "shared", "skills", "parley", "SKILL.md");
+      await writeFile(skillPath, `${skill}\n${secret}\n`);
+      const outputDir = join(sourceDir, "dist");
+      const [artifact] = await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+      await assert.rejects(
+        scanForSecrets({ root: artifact.archivePath }),
+        (error) => {
+          assert.doesNotMatch(error.message, new RegExp(secret));
+          return /credential/i.test(error.message);
+        },
+      );
+    });
+  });
+}
+
+for (const prefix of publicIdentifierPrefixes) {
+  test(`secret scanner permits public ${prefix} identifiers in source and archives`, async () => {
+    const identifier = prefixedValue(prefix);
+    await withFixture(async (sourceDir) => {
+      await writeFile(join(sourceDir, "identifier.log"), identifier);
+      assert.deepEqual(await scanForSecrets({ root: sourceDir }), { scanned: true });
+      await rm(join(sourceDir, "identifier.log"));
+
+      const skillPath = join(sourceDir, "shared", "skills", "parley", "SKILL.md");
+      await writeFile(skillPath, `${skill}\n${identifier}\n`);
+      const outputDir = join(sourceDir, "dist");
+      const [artifact] = await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+      assert.deepEqual(await scanForSecrets({ root: artifact.archivePath }), { scanned: true });
+    });
+  });
+}
+
 test("validator rejects artifacts that expose more than one logical Parley server", async () => {
   await withFixture(async (sourceDir) => {
     const manifest = pluginManifest();
@@ -302,4 +391,162 @@ test("validator rejects a Claude artifact without native author metadata", async
       /Claude native manifest is invalid/i,
     );
   });
+});
+
+test("validator rejects a materialized shared-skill byte mismatch", async () => {
+  await withFixture(async (sourceDir) => {
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    await writeFile(join(outputDir, "codex", "skills", "parley", "SKILL.md"), "tampered");
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /materialized artifact differs/i,
+    );
+  });
+});
+
+test("validator rejects an extra materialized artifact file", async () => {
+  await withFixture(async (sourceDir) => {
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    await writeFile(join(outputDir, "claude", "unexpected.txt"), "extra");
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /unexpected materialized artifact path/i,
+    );
+  });
+});
+
+test("validator rejects an extra empty materialized artifact directory", async () => {
+  await withFixture(async (sourceDir) => {
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    await mkdir(join(outputDir, "codex", "unexpected-directory"));
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /unexpected materialized artifact path/i,
+    );
+  });
+});
+
+test("validator rejects a missing materialized artifact file", async () => {
+  await withFixture(async (sourceDir) => {
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    await rm(join(outputDir, "gemini", "gemini-extension.json"));
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /missing materialized artifact path/i,
+    );
+  });
+});
+
+test("validator rejects a symlinked materialized artifact file", async () => {
+  await withFixture(async (sourceDir) => {
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    const skillPath = join(outputDir, "codex", "skills", "parley", "SKILL.md");
+    await rm(skillPath);
+    await symlink(join(sourceDir, "package.json"), skillPath, "file");
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /symlinked materialized artifact/i,
+    );
+  });
+});
+
+test("validator pins compatibility and every host manifest to the trusted MCP origin", async () => {
+  await withFixture(async (sourceDir) => {
+    const changedOrigin = "https://coordinated-edit.example/mcp";
+    const changedCompatibility = compatibility();
+    changedCompatibility.canonicalMcpOrigin = changedOrigin;
+    await writeJson(join(sourceDir, "compatibility.json"), changedCompatibility);
+
+    const codex = pluginManifest();
+    codex.mcpServers.parley.url = changedOrigin;
+    await writeJson(join(sourceDir, "hosts", "codex", ".codex-plugin", "plugin.json"), codex);
+    await writeJson(join(sourceDir, "hosts", "claude", ".mcp.json"), {
+      mcpServers: { parley: { type: "http", url: changedOrigin } },
+    });
+    const gemini = geminiManifest();
+    gemini.mcpServers.parley.httpUrl = changedOrigin;
+    await writeJson(join(sourceDir, "hosts", "gemini", "gemini-extension.json"), gemini);
+
+    const outputDir = join(sourceDir, "dist");
+    await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+    await assert.rejects(
+      validateArtifacts({ root: sourceDir, outputDir }),
+      /trusted MCP origin/i,
+    );
+  });
+});
+
+test("native validation plans the pinned Codex, Claude, and Gemini gates without a skip path", async () => {
+  const calls = [];
+  await runNativeValidators({
+    outputDir: join(repositoryRoot, "dist"),
+    runner: async (call) => {
+      calls.push(call);
+    },
+  });
+  assert.deepEqual(calls.map((call) => call.host), ["codex", "claude", "gemini"]);
+  assert.match(calls[0].args.join(" "), /tools[\\/]codex-plugin-validator[\\/]validate_plugin\.py/);
+  assert.equal(calls[1].command, join(repositoryRoot, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
+  assert.deepEqual(calls[1].args, ["plugin", "validate", join(repositoryRoot, "dist", "claude"), "--strict"]);
+  assert.equal(calls[2].command, process.execPath);
+  assert.deepEqual(calls[2].args, [join(repositoryRoot, "node_modules", "@google", "gemini-cli", "bundle", "gemini.js"), "extensions", "validate", join(repositoryRoot, "dist", "gemini")]);
+});
+
+test("native validation fails explicitly when a required host validator is unavailable", async () => {
+  await assert.rejects(
+    runNativeValidators({
+      outputDir: join(repositoryRoot, "dist"),
+      runner: async (call) => {
+        if (call.host === "gemini") {
+          const error = new Error("command not found");
+          error.code = "ENOENT";
+          throw error;
+        }
+      },
+    }),
+    /Gemini native validator unavailable/i,
+  );
+});
+
+test("CI installs pinned native validators before pnpm validate", async () => {
+  const packageJson = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
+  const ci = await readFile(join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
+  const pnpmWorkspace = await readFile(join(repositoryRoot, "pnpm-workspace.yaml"), "utf8");
+  const validatorGate = await readFile(join(repositoryRoot, "scripts", "validate.mjs"), "utf8");
+  assert.equal(packageJson.devDependencies["@anthropic-ai/claude-code"], "2.1.237");
+  assert.equal(packageJson.devDependencies["@google/gemini-cli"], "0.56.0");
+  assert.match(ci, /actions\/setup-python@v5/);
+  assert.match(ci, /python -m pip install --disable-pip-version-check -r tools\/codex-plugin-validator\/requirements\.txt/);
+  assert.match(ci, /pnpm validate/);
+  assert.match(validatorGate, /await runNativeValidators\(\{ outputDir: join\(projectRoot\(\), "dist"\) \}\)/);
+  assert.match(pnpmWorkspace, /'@anthropic-ai\/claude-code': true/);
+  assert.match(pnpmWorkspace, /'@github\/keytar': false/);
+  assert.match(pnpmWorkspace, /node-pty: false/);
+});
+
+test("release imports and constrains the configured signer before verifying the exact tag", async () => {
+  const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+  const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");
+
+  assert.match(release, /PARLEY_RELEASE_SIGNER_PUBLIC_KEY:\s*\$\{\{ vars\.PARLEY_RELEASE_SIGNER_PUBLIC_KEY \}\}/);
+  assert.match(release, /PARLEY_RELEASE_SIGNER_FINGERPRINT:\s*\$\{\{ vars\.PARLEY_RELEASE_SIGNER_FINGERPRINT \}\}/);
+  assert.match(release, /GNUPGHOME="\$\(mktemp -d\)"/);
+  assert.match(release, /gpg --batch --homedir "\$\{GNUPGHOME\}" --import/);
+  assert.match(release, /--with-colons --fingerprint/);
+  assert.match(release, /tr -d '\[:space:\]' \| tr '\[:lower:\]' '\[:upper:\]'/);
+  assert.match(release, /\^\(\[A-F0-9\]\{40\}\|\[A-F0-9\]\{64\}\)\$/);
+  assert.match(release, /actual_fingerprints="\$\(gpg --batch --homedir "\$\{GNUPGHOME\}" --with-colons --fingerprint --list-keys/);
+  assert.match(release, /actual_fingerprint_count="\$\(printf '%s\\n' "\$\{actual_fingerprints\}" \| sed '\/\^\$\/d' \| wc -l \| tr -d '\[:space:\]'\)"/);
+  assert.match(release, /test "\$\{actual_fingerprint_count\}" = "1"/);
+  assert.match(release, /actual_fingerprint="\$\{actual_fingerprints\}"/);
+  assert.match(release, /test "\$\{expected_fingerprint\}" = "\$\{actual_fingerprint\}"/);
+  assert.match(release, /git verify-tag "\$\{tag\}"/);
+  assert.ok(release.indexOf('test "${actual_fingerprint_count}" = "1"') < release.indexOf('git verify-tag "${tag}"'));
+  assert.match(readme, /PARLEY_RELEASE_SIGNER_PUBLIC_KEY/);
+  assert.match(readme, /PARLEY_RELEASE_SIGNER_FINGERPRINT/);
 });

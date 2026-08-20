@@ -9,7 +9,6 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -342,10 +341,63 @@ export async function writeFileAtomically(destination, bytes, { rename = renameF
   }
 }
 
-async function replaceMaterializedDirectory(stagedDirectory, destination) {
+async function existingPath(path) {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function replaceMaterializedDirectory(
+  stagedDirectory,
+  destination,
+  { rename = renameFile, remove = rm, stat = existingPath } = {},
+) {
   await mkdir(dirname(destination), { recursive: true });
-  await rm(destination, { recursive: true, force: true });
-  await renameFile(stagedDirectory, destination);
+  const backup = `${destination}.backup`;
+  const staged = await stat(stagedDirectory);
+  if (staged === null || !staged.isDirectory() || staged.isSymbolicLink()) {
+    throw new Error("Materialized artifact staging root must be a real directory.");
+  }
+
+  const existingDestination = await stat(destination);
+  const existingBackup = await stat(backup);
+  if (existingDestination === null && existingBackup !== null) {
+    await rename(backup, destination);
+  } else if (existingDestination !== null && existingBackup !== null) {
+    await remove(backup, { recursive: true, force: true });
+  }
+
+  let movedPreviousRoot = false;
+  let promoted = false;
+  try {
+    if (await stat(destination)) {
+      await rename(destination, backup);
+      movedPreviousRoot = true;
+    }
+    await rename(stagedDirectory, destination);
+    promoted = true;
+    if (movedPreviousRoot) {
+      await remove(backup, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (movedPreviousRoot && (await stat(backup))) {
+      try {
+        await rename(backup, destination);
+      } catch (restoreError) {
+        throw new Error(`Materialized artifact promotion failed and prior root restoration failed: ${restoreError.message}`);
+      }
+    }
+    throw error;
+  } finally {
+    if (!promoted) {
+      await remove(stagedDirectory, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 }
 
 export async function buildArtifacts({
@@ -363,7 +415,8 @@ export async function buildArtifacts({
   const timestamp = parseSourceDateEpoch(sourceDateEpoch);
   const absoluteSource = resolve(sourceDir);
   const absoluteOutput = resolve(outputDir);
-  const stagingRoot = await mkdtemp(join(tmpdir(), "parley-plugin-stage-"));
+  await mkdir(absoluteOutput, { recursive: true });
+  const stagingRoot = await mkdtemp(join(absoluteOutput, ".stage-"));
   try {
     const prepared = [];
     for (const host of HOSTS) {

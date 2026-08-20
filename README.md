@@ -24,6 +24,15 @@ pnpm scan-secrets
 
 The build produces three versioned ZIP artifacts, their SHA-256 checksum files, and materialized native roots in `dist/`. The package version is the one source of artifact version truth.
 
+## Release signer configuration
+
+The release workflow accepts only an annotated `v${package.version}` tag signed by the configured public key. Before enabling releases, add these repository **Variables** (not secrets):
+
+- `PARLEY_RELEASE_SIGNER_PUBLIC_KEY`: the ASCII-armored public verification key.
+- `PARLEY_RELEASE_SIGNER_FINGERPRINT`: the authorized primary-key fingerprint (40-character v4 or 64-character v5 hexadecimal); whitespace and case are normalized before an exact comparison.
+
+The workflow imports that public key into an isolated temporary GnuPG home, rejects key blobs with anything other than exactly one primary fingerprint, requires that fingerprint to match, and then runs `git verify-tag`. Never store a private key in this repository, its variables, or GitHub Actions.
+
 ## Compatibility status
 
 `compatibility.json` records only the supported host surface and its enforcement posture. It intentionally makes no host-version certification claim until the host-specific tasks complete live validation.

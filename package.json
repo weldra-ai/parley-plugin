@@ -11,5 +11,9 @@
     "test": "node --test tests/*.test.mjs",
     "validate": "node scripts/validate.mjs",
     "scan-secrets": "node scripts/scan-secrets.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.237",
+    "@google/gemini-cli": "0.56.0"
   }
 }

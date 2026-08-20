@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HOSTS, readZipFiles } from "./build.mjs";
+import { runNativeValidators } from "./native-validate.mjs";
 
 const REQUIRED_MANIFESTS = {
   codex: ".codex-plugin/plugin.json",
@@ -15,6 +16,7 @@ const ENFORCEMENT_MODES = new Set([
   "certified host-local helper",
   "omitting/disabling capability",
 ]);
+export const TRUSTED_MCP_ORIGIN = "https://parley.weldra.dev/mcp";
 
 function projectRoot() {
   return dirname(dirname(fileURLToPath(import.meta.url)));
@@ -100,8 +102,8 @@ function validateCompatibility(compatibility) {
   if (compatibility.schemaVersion !== 1 || compatibility.lifecycleMode !== "oauth") {
     throw new Error("Compatibility declaration must use the canonical OAuth lifecycle.");
   }
-  if (typeof compatibility.canonicalMcpOrigin !== "string" || !compatibility.canonicalMcpOrigin.startsWith("https://")) {
-    throw new Error("Compatibility declaration must provide an HTTPS MCP origin.");
+  if (compatibility.canonicalMcpOrigin !== TRUSTED_MCP_ORIGIN) {
+    throw new Error("Compatibility declaration must equal the trusted MCP origin.");
   }
   const hosts = assertObject(compatibility.hosts, "Compatibility hosts");
   for (const host of HOSTS) {
@@ -120,7 +122,7 @@ function validateCompatibility(compatibility) {
       throw new Error(`Minimum support for ${host} must use semver or null.`);
     }
   }
-  return compatibility.canonicalMcpOrigin;
+  return TRUSTED_MCP_ORIGIN;
 }
 
 async function readArtifactFiles(archivePath) {
@@ -131,10 +133,78 @@ async function readArtifactFiles(archivePath) {
   return files;
 }
 
-async function assertMaterializedManifest(outputDir, host, expected) {
-  const actual = await readFile(join(outputDir, host, ...REQUIRED_MANIFESTS[host].split("/")));
-  if (!actual.equals(expected)) {
-    throw new Error(`${host} materialized artifact differs from its archive.`);
+async function collectMaterializedFiles(root) {
+  let rootStat;
+  try {
+    rootStat = await lstat(root);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error("Missing materialized artifact root.");
+    }
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error("Materialized artifact root must be a real directory.");
+  }
+
+  const files = new Map();
+  const directories = new Set();
+  const visit = async (directory, prefix = "") => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Symlinked materialized artifact entry: ${relativePath}`);
+      }
+      if (stat.isDirectory()) {
+        directories.add(relativePath);
+        await visit(path, relativePath);
+      } else if (stat.isFile()) {
+        files.set(relativePath, await readFile(path));
+      } else {
+        throw new Error(`Unsupported materialized artifact entry: ${relativePath}`);
+      }
+    }
+  };
+  await visit(root);
+  return { files, directories };
+}
+
+async function assertMaterializedParity(outputDir, host, archivedFiles) {
+  const { files: materializedFiles, directories: materializedDirectories } = await collectMaterializedFiles(join(outputDir, host));
+  const archivedDirectories = new Set();
+  for (const path of archivedFiles.keys()) {
+    const segments = path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      archivedDirectories.add(segments.slice(0, index).join("/"));
+    }
+  }
+  for (const [path, expected] of archivedFiles) {
+    const actual = materializedFiles.get(path);
+    if (actual === undefined) {
+      throw new Error(`Missing materialized artifact path for ${host}: ${path}`);
+    }
+    if (!actual.equals(expected)) {
+      throw new Error(`${host} materialized artifact differs from its archive: ${path}`);
+    }
+  }
+  for (const path of materializedFiles.keys()) {
+    if (!archivedFiles.has(path)) {
+      throw new Error(`Unexpected materialized artifact path for ${host}: ${path}`);
+    }
+  }
+  for (const path of archivedDirectories) {
+    if (!materializedDirectories.has(path)) {
+      throw new Error(`Missing materialized artifact path for ${host}: ${path}`);
+    }
+  }
+  for (const path of materializedDirectories) {
+    if (!archivedDirectories.has(path)) {
+      throw new Error(`Unexpected materialized artifact path for ${host}: ${path}`);
+    }
   }
 }
 
@@ -167,7 +237,7 @@ export async function validateArtifacts({
       throw new Error(`${host} artifact is missing required native files.`);
     }
     NATIVE_VALIDATORS[host](files, canonicalOrigin, version);
-    await assertMaterializedManifest(outputDir, host, files.get(manifestPath));
+    await assertMaterializedParity(outputDir, host, files);
     skillHashes.push(hash(files.get("skills/parley/SKILL.md")));
   }
   if (!skillHashes.every((candidate) => candidate === sourceSkillHash)) {
@@ -178,6 +248,7 @@ export async function validateArtifacts({
 
 async function main() {
   const result = await validateArtifacts();
+  await runNativeValidators({ outputDir: join(projectRoot(), "dist") });
   console.log(`Validated ${HOSTS.length} native artifacts for ${result.version}.`);
 }
 
