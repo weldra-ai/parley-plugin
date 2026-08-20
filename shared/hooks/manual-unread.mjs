@@ -19,20 +19,49 @@ function selectToken(environment) {
   return typeof token === "string" && /^[A-Za-z0-9_-]{1,1024}$/.test(token) ? token : null;
 }
 
-function unreadUrl(baseUrl) {
+function unreadUrl(baseUrl, space) {
   const url = new URL(baseUrl);
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     return null;
   }
   url.pathname = `${url.pathname.replace(/\/$/, "")}/unread`;
-  url.search = "format=json";
+  url.search = "";
+  url.searchParams.set("format", "json");
+  url.searchParams.set("space", space);
   url.hash = "";
   return url;
 }
 
-async function readSmallBody(response) {
+function isResolvedSpace(space) {
+  return (
+    typeof space === "string" &&
+    space.length > 0 &&
+    space === space.trim() &&
+    !/[\u0000-\u001F\u007F]/.test(space)
+  );
+}
+
+function isSupportedClient(client) {
+  return client === "claude" || client === "codex" || client === "gemini";
+}
+
+async function abortAndCancelResponse(response, controller, reader = null) {
+  controller.abort();
+  try {
+    if (reader) {
+      await reader.cancel();
+    } else {
+      await response.body?.cancel();
+    }
+  } catch {
+    // Aborting a response can race its stream cancellation; either action closes the transport.
+  }
+}
+
+async function readSmallBody(response, controller) {
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    await abortAndCancelResponse(response, controller);
     return null;
   }
   if (!response.body) {
@@ -50,7 +79,7 @@ async function readSmallBody(response) {
       }
       length += value.byteLength;
       if (length > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
+        await abortAndCancelResponse(response, controller, reader);
         return null;
       }
       chunks.push(value);
@@ -64,14 +93,19 @@ async function readSmallBody(response) {
 export async function runManualUnread({
   environment = process.env,
   baseUrl = PARLEY_BASE_URL,
+  space,
+  client,
   fetchImpl = globalThis.fetch,
   timeoutMs = REQUEST_TIMEOUT_MS,
   write = (line) => process.stdout.write(line),
 } = {}) {
   try {
     const token = selectToken(environment);
-    const url = unreadUrl(baseUrl);
-    if (!token || !url || typeof fetchImpl !== "function") {
+    if (!token || !isResolvedSpace(space) || !isSupportedClient(client) || typeof fetchImpl !== "function") {
+      return;
+    }
+    const url = unreadUrl(baseUrl, space);
+    if (!url) {
       return;
     }
 
@@ -85,13 +119,14 @@ export async function runManualUnread({
         signal: controller.signal,
         headers: {
           Authorization: `Bearer ${token}`,
-          "X-Agent-Client": "manual",
+          "X-Agent-Client": client,
         },
       });
       if (!response.ok) {
+        await abortAndCancelResponse(response, controller);
         return;
       }
-      const body = await readSmallBody(response);
+      const body = await readSmallBody(response, controller);
       if (body === null) {
         return;
       }

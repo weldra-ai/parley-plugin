@@ -65,6 +65,39 @@ async function withCaptureServer(respond, run) {
   }
 }
 
+async function withHangingResponseServer(respond, run) {
+  const requests = [];
+  let resolveResponseClosed;
+  const responseClosed = new Promise((resolve) => {
+    resolveResponseClosed = resolve;
+  });
+  const server = createServer((request, response) => {
+    requests.push({
+      method: request.method,
+      url: request.url,
+    });
+    response.once("close", resolveResponseClosed);
+    respond(request, response);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    await run({ baseUrl, requests, responseClosed });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function settlesWithin(promise, timeoutMs) {
+  return Promise.race([
+    promise.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
 function captureOutput() {
   const output = [];
   return { output, write: (value) => output.push(value) };
@@ -115,7 +148,7 @@ test("OAuth session reminder emits one line and makes no request", async () => {
   );
 });
 
-test("manual unread stays quiet without a credential or with conflicting credentials", async () => {
+test("manual unread stays quiet without a credential, verified space, or valid host client", async () => {
   await withCaptureServer(
     (_request, response) => response.end(JSON.stringify({ total: 4 })),
     async ({ baseUrl, requests }) => {
@@ -124,7 +157,32 @@ test("manual unread stays quiet without a credential or with conflicting credent
         { PARLEY_TOKEN: "first-token", CLAUDE_PLUGIN_OPTION_PARLEY_TOKEN: "second-token" },
       ]) {
         const capture = captureOutput();
-        await runManualUnread({ environment, baseUrl, write: capture.write });
+        await runManualUnread({
+          environment,
+          baseUrl,
+          space: "https://github.com/weldra-ai/parley.git",
+          client: "claude",
+          write: capture.write,
+        });
+        assert.deepEqual(capture.output, []);
+      }
+      for (const options of [
+        { space: undefined, client: "claude" },
+        { space: "", client: "claude" },
+        { space: " \t\r\n", client: "claude" },
+        { space: "\u0000", client: "claude" },
+        { space: " https://github.com/weldra-ai/parley.git", client: "claude" },
+        { space: "https://github.com/weldra-ai/parley.git ", client: "claude" },
+        { space: "https://github.com/weldra-ai/parley.git", client: undefined },
+        { space: "https://github.com/weldra-ai/parley.git", client: "manual" },
+      ]) {
+        const capture = captureOutput();
+        await runManualUnread({
+          environment: { PARLEY_TOKEN: "context-test-token" },
+          baseUrl,
+          ...options,
+          write: capture.write,
+        });
         assert.deepEqual(capture.output, []);
       }
       assert.deepEqual(requests, []);
@@ -132,7 +190,7 @@ test("manual unread stays quiet without a credential or with conflicting credent
   );
 });
 
-test("manual unread sends one authorized request and emits only the count", async () => {
+test("manual unread sends the adapter's host and verified space with one authorized request", async () => {
   await withCaptureServer(
     (_request, response) => {
       response.setHeader("content-type", "application/json");
@@ -144,15 +202,17 @@ test("manual unread sends one authorized request and emits only the count", asyn
       await runManualUnread({
         environment: { PARLEY_TOKEN: token },
         baseUrl,
+        space: "git@github.com:weldra-ai/parley.git",
+        client: "codex",
         write: capture.write,
       });
 
       assert.deepEqual(requests, [
         {
           method: "GET",
-          url: "/unread?format=json",
+          url: "/unread?format=json&space=git%40github.com%3Aweldra-ai%2Fparley.git",
           authHeader: `Bearer ${token}`,
-          agentClient: "manual",
+          agentClient: "codex",
         },
       ]);
       assert.deepEqual(capture.output, ["Parley: 4 unread message(s).\n"]);
@@ -182,6 +242,8 @@ test("manual unread stays quiet for zero unread and invalid responses", async (c
           await runManualUnread({
             environment: { CLAUDE_PLUGIN_OPTION_PARLEY_TOKEN: "claude-test-token" },
             baseUrl,
+            space: "main",
+            client: "claude",
             write: capture.write,
           });
           assert.deepEqual(capture.output, []);
@@ -201,11 +263,83 @@ test("manual unread uses a three-second production timeout and fails open on tim
       await runManualUnread({
         environment: { PARLEY_TOKEN: "timeout-test-token" },
         baseUrl,
+        space: "main",
+        client: "gemini",
         timeoutMs: 20,
         write: capture.write,
       });
       assert.deepEqual(capture.output, []);
       assert.equal(requests.length, 1);
+    },
+  );
+});
+
+test("manual unread cancels a declared oversized response before it keeps the connection open", async () => {
+  await withHangingResponseServer(
+    (_request, response) => {
+      response.statusCode = 200;
+      response.setHeader("content-length", String(16 * 1024 + 1));
+      response.flushHeaders();
+    },
+    async ({ baseUrl, requests, responseClosed }) => {
+      const capture = captureOutput();
+      await runManualUnread({
+        environment: { PARLEY_TOKEN: "oversized-header-token" },
+        baseUrl,
+        space: "main",
+        client: "gemini",
+        write: capture.write,
+      });
+
+      assert.deepEqual(capture.output, []);
+      assert.deepEqual(requests, [{ method: "GET", url: "/unread?format=json&space=main" }]);
+      assert.equal(await settlesWithin(responseClosed, 250), true);
+    },
+  );
+});
+
+test("manual unread cancels a non-success response before it keeps the connection open", async () => {
+  await withHangingResponseServer(
+    (_request, response) => {
+      response.statusCode = 503;
+      response.flushHeaders();
+    },
+    async ({ baseUrl, requests, responseClosed }) => {
+      const capture = captureOutput();
+      await runManualUnread({
+        environment: { PARLEY_TOKEN: "non-success-token" },
+        baseUrl,
+        space: "main",
+        client: "claude",
+        write: capture.write,
+      });
+
+      assert.deepEqual(capture.output, []);
+      assert.deepEqual(requests, [{ method: "GET", url: "/unread?format=json&space=main" }]);
+      assert.equal(await settlesWithin(responseClosed, 250), true);
+    },
+  );
+});
+
+test("manual unread cancels a streamed oversized response before it keeps the connection open", async () => {
+  await withHangingResponseServer(
+    (_request, response) => {
+      response.statusCode = 200;
+      response.write("x".repeat(16 * 1024 + 1));
+    },
+    async ({ baseUrl, requests, responseClosed }) => {
+      const capture = captureOutput();
+      await runManualUnread({
+        environment: { PARLEY_TOKEN: "oversized-stream-token" },
+        baseUrl,
+        space: "main",
+        client: "codex",
+        write: capture.write,
+      });
+
+      assert.deepEqual(capture.output, []);
+      assert.deepEqual(requests, [{ method: "GET", url: "/unread?format=json&space=main" }]);
+      assert.equal(await settlesWithin(responseClosed, 250), true);
     },
   );
 });
@@ -220,22 +354,16 @@ test("manual unread recognizes a resolved Windows script path", { skip: process.
   );
 });
 
-test("manual unread entrypoint executes once with a captured fetch", async () => {
+test("manual unread entrypoint stays quiet until an adapter supplies verified context", async () => {
   const token = "spawn-test-token";
   await withFetchPreload(async ({ capturePath, preloadUrl }) => {
     const result = await runNode(manualUnreadPath, { PARLEY_TOKEN: token }, ["--import", preloadUrl]);
-    const capture = JSON.parse(await readFile(capturePath, "utf8"));
 
     assert.equal(result.code, 0);
     assert.equal(result.signal, null);
-    assert.equal(result.stdout, "Parley: 1 unread message(s).\n");
+    assert.equal(result.stdout, "");
     assert.equal(result.stderr, "");
     assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(token));
-    assert.deepEqual(capture, {
-      url: "https://parley.weldra.dev/unread?format=json",
-      method: "GET",
-      authenticated: true,
-      agentClient: "manual",
-    });
+    await assert.rejects(readFile(capturePath, "utf8"), { code: "ENOENT" });
   });
 });
