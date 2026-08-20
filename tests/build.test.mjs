@@ -133,7 +133,10 @@ async function makeFixture() {
     },
   });
   await mkdir(join(hosts, "claude", "scripts"), { recursive: true });
-  await writeFile(join(hosts, "claude", "scripts", "space-headers.mjs"), "process.stdout.write('{}\\n');\n");
+  await writeFile(
+    join(hosts, "claude", "scripts", "space-headers.mjs"),
+    await readFile(join(repositoryRoot, "hosts", "claude", "scripts", "space-headers.mjs")),
+  );
   await writeJson(join(hosts, "gemini", "gemini-extension.json"), geminiManifest());
   const skillPath = join(shared, "skills", "parley", "SKILL.md");
   await mkdir(dirname(skillPath), { recursive: true });

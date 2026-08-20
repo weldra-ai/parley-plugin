@@ -12,7 +12,7 @@ Parley endpoint:
 ```
 
 ```sh
-./scripts/connect-manual.sh
+sh ./scripts/connect-manual.sh
 ```
 
 The manager sends the token only over standard input, stores it only in Claude Code's user profile,
@@ -27,7 +27,7 @@ To remove only the owned manual override and return to OAuth, run:
 ```
 
 ```sh
-./scripts/connect-oauth.sh
+sh ./scripts/connect-oauth.sh
 ```
 
 The plugin derives the Parley space from the repository's unambiguous `origin` remote. A repository

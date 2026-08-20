@@ -16,8 +16,21 @@ import {
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
 
-function runtimeSentinel() {
-  return ["p", "n"].join("") + "_" + "a".repeat(24);
+function runtimeSentinel(letter = "a") {
+  return ["p", "n"].join("") + "_" + letter.repeat(24);
+}
+
+async function temporaryFiles(directory) {
+  const files = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await temporaryFiles(path));
+    } else if (entry.isFile() && entry.name.endsWith(".tmp")) {
+      files.push(path);
+    }
+  }
+  return files;
 }
 
 async function withProfile(run) {
@@ -276,6 +289,39 @@ test("Claude manager restores the transition if lock release fails", async () =>
     await assert.rejects(readFile(paths.helperPath));
     await assert.rejects(readFile(paths.sidecarPath));
     assert.equal((await readdir(paths.directory)).some((name) => /tmp|backup|lock/i.test(name)), false);
+  });
+});
+
+test("Claude manager leaves no bearer temporary file when post-promotion cleanup fails", async () => {
+  await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
+    const priorToken = runtimeSentinel("a");
+    const newToken = runtimeSentinel("b");
+    await applyClaudeManual({ profileDir, token: priorToken, helperSourcePath, canonicalOrigin });
+    const originalConfig = await readFile(configPath);
+    let cleanupCalls = 0;
+    const temporaryRemover = async (path) => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 3) {
+        throw new Error("Injected temporary cleanup failure.");
+      }
+      await rm(path, { force: true });
+    };
+
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: newToken,
+        helperSourcePath,
+        canonicalOrigin,
+        failAt: "validation",
+        temporaryRemover,
+      }),
+      /safely restore|temporary cleanup/i,
+    );
+    assert.equal(cleanupCalls, 3, "the injected failure must occur after the direct config promotion");
+    assert.deepEqual(await readFile(configPath), originalConfig);
+    const leftovers = await temporaryFiles(root);
+    assert.equal(leftovers.length, 0, "a cleanup failure after config promotion must not retain a bearer temporary");
   });
 });
 

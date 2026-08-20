@@ -18,6 +18,7 @@ const ENFORCEMENT_MODES = new Set([
 ]);
 export const TRUSTED_MCP_ORIGIN = "https://parley.weldra.dev/mcp";
 const CLAUDE_HEADERS_HELPER = "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\"";
+const TRUSTED_CLAUDE_SPACE_HELPER_SHA256 = "b03210c959f1efdbdaabf816ab1c5382acd3571f648d99a522cf5e03fb00df7b";
 const FORBIDDEN_AUTH_HEADER_NAMES = new Set([
   "authorization",
   "proxy-authorization",
@@ -100,12 +101,15 @@ function validateClaude(files, canonicalOrigin, version) {
     throw new Error("Claude OAuth artifact must not declare userConfig credentials.");
   }
   const server = assertOneParleyServer(mcp.mcpServers, canonicalOrigin, "Claude artifact");
+  if (Object.hasOwn(server, "headers")) {
+    throw new Error("Claude OAuth artifact must not define static MCP headers.");
+  }
   if (server.headersHelper !== CLAUDE_HEADERS_HELPER) {
     throw new Error("Claude headersHelper must be the bundled space-only helper.");
   }
   const helper = files.get("scripts/space-headers.mjs");
-  if (helper === undefined || /authorization/i.test(helper.toString("utf8"))) {
-    throw new Error("Claude headersHelper must not emit Authorization.");
+  if (helper === undefined || hash(helper) !== TRUSTED_CLAUDE_SPACE_HELPER_SHA256) {
+    throw new Error("Claude headersHelper must exactly match the trusted space-only output contract.");
   }
   if (files.get("scripts/managed-config.mjs") === undefined) {
     throw new Error("Claude artifact must include the shared manual configuration manager.");

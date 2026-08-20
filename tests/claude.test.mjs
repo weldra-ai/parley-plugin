@@ -101,7 +101,7 @@ function claudeMcp({
   };
 }
 
-async function makeArtifactFixture(mcp = claudeMcp(), helperSource = "process.stdout.write('{}\\n');\n") {
+async function makeArtifactFixture(mcp = claudeMcp(), helperSource) {
   const root = await mkdtemp(join(tmpdir(), "parley-claude-artifact-"));
   await writeJson(join(root, "package.json"), { version: "0.1.0" });
   await writeJson(join(root, "compatibility.json"), compatibility());
@@ -120,7 +120,10 @@ async function makeArtifactFixture(mcp = claudeMcp(), helperSource = "process.st
     },
   });
   await mkdir(join(root, "hosts", "claude", "scripts"), { recursive: true });
-  await writeFile(join(root, "hosts", "claude", "scripts", "space-headers.mjs"), helperSource);
+  await writeFile(
+    join(root, "hosts", "claude", "scripts", "space-headers.mjs"),
+    helperSource ?? await readFile(helperPath),
+  );
   await writeJson(join(root, "hosts", "codex", ".codex-plugin", "plugin.json"), {
     name: "parley",
     version: "0.1.0",
@@ -206,6 +209,8 @@ test("Claude README documents the lower-capability explicit-space recovery witho
   assert.match(readme, /retry[\s\S]*explicit.*space/i);
   assert.match(readme, /later.*space-aware.*call/i);
   assert.match(readme, /ambiguous Git.*never retry/i);
+  assert.match(readme, /sh \.\/scripts\/connect-manual\.sh/);
+  assert.match(readme, /sh \.\/scripts\/connect-oauth\.sh/);
 });
 
 test("Claude manual and OAuth command wrappers keep credentials out of arguments and history", async () => {
@@ -254,8 +259,14 @@ test("Claude validator rejects every bundled Authorization source", async (conte
     ["proxy authorization", claudeMcp({
       headers: { "Proxy-Authorization": "Bearer alternative" },
     })],
+    ["static space", claudeMcp({ headers: { "X-Space": "main" } })],
     ["helper", claudeMcp({ headersHelper: "echo '{\"Authorization\":\"Bearer forbidden\"}'" })],
     ["helper output", claudeMcp(), "process.stdout.write('{\"Authorization\":\"Bearer alternate\"}');\n"],
+    [
+      "computed helper authorization",
+      claudeMcp(),
+      "const key = [\"Author\", \"ization\"].join(\"\"); process.stdout.write(JSON.stringify({ [key]: \"Bearer alternate\" }));\n",
+    ],
   ];
 
   for (const [name, mcp, helperSource] of cases) {

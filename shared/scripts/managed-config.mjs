@@ -50,7 +50,7 @@ async function readRegularFile(path, label) {
   return readFile(path);
 }
 
-async function atomicWrite(path, bytes, { failAt, phase } = {}) {
+async function atomicWrite(path, bytes, { failAt, phase, temporaryRemover = rm } = {}) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(path), `.${randomBytes(12).toString("hex")}.tmp`);
   try {
@@ -60,13 +60,31 @@ async function atomicWrite(path, bytes, { failAt, phase } = {}) {
     await rename(temporary, path);
     await chmod(path, 0o600);
   } finally {
-    await rm(temporary, { force: true }).catch(() => {});
+    await temporaryRemover(temporary, { force: true });
   }
 }
 
-async function restore(path, original) {
+// Claude's profile config intentionally holds the bearer when manual mode is active. Do not stage this
+// file through an atomic temporary: a filesystem cleanup failure could leave a second bearer-bearing file.
+// The transaction keeps the old config only in memory and restores it directly if any later step fails.
+async function writeClaudeConfig(path, bytes, { failAt, phase } = {}) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  failIfRequested(failAt, phase);
+  await writeFile(path, bytes, { mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
+async function restore(path, original, { temporaryRemover } = {}) {
   if (original.exists) {
-    await atomicWrite(path, original.bytes);
+    await atomicWrite(path, original.bytes, { temporaryRemover });
+  } else {
+    await rm(path, { force: true });
+  }
+}
+
+async function restoreClaudeConfig(path, original) {
+  if (original.exists) {
+    await writeClaudeConfig(path, original.bytes);
   } else {
     await rm(path, { force: true });
   }
@@ -248,10 +266,10 @@ async function assertExistingOwned({ servers, paths, canonicalOrigin }) {
   return true;
 }
 
-async function restoreAll(paths, originals) {
-  await restore(paths.configPath, originals.config);
-  await restore(paths.helperPath, originals.helper);
-  await restore(paths.sidecarPath, originals.sidecar);
+async function restoreAll(paths, originals, { temporaryRemover } = {}) {
+  await restoreClaudeConfig(paths.configPath, originals.config);
+  await restore(paths.helperPath, originals.helper, { temporaryRemover });
+  await restore(paths.sidecarPath, originals.sidecar, { temporaryRemover });
 }
 
 async function acquireProfileLock(paths, { failAt } = {}) {
@@ -290,7 +308,7 @@ async function acquireProfileLock(paths, { failAt } = {}) {
   };
 }
 
-async function runClaudeTransaction(paths, failAt, transition) {
+async function runClaudeTransaction(paths, failAt, transition, { temporaryRemover } = {}) {
   const releaseLock = await acquireProfileLock(paths, { failAt });
   let originals = null;
   try {
@@ -307,7 +325,7 @@ async function runClaudeTransaction(paths, failAt, transition) {
     let restoreError = null;
     if (originals !== null) {
       try {
-        await restoreAll(paths, originals);
+        await restoreAll(paths, originals, { temporaryRemover });
       } catch (caught) {
         restoreError = caught;
       }
@@ -334,6 +352,7 @@ export async function applyClaudeManual({
   helperSourcePath,
   canonicalOrigin,
   failAt,
+  temporaryRemover,
 } = {}) {
   assertToken(token);
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
@@ -353,20 +372,21 @@ export async function applyClaudeManual({
         headers: { Authorization: `Bearer ${token}` },
         headersHelper: claudeHeadersHelper(paths.helperPath),
       };
-      await atomicWrite(paths.helperPath, helperBytes, { failAt, phase: "helper-promotion" });
-      await atomicWrite(paths.sidecarPath, encodeJson(metadata), { failAt, phase: "sidecar-promotion" });
-      await atomicWrite(paths.configPath, encodeJson(value), { failAt, phase: "config-promotion" });
+      await atomicWrite(paths.helperPath, helperBytes, { failAt, phase: "helper-promotion", temporaryRemover });
+      await atomicWrite(paths.sidecarPath, encodeJson(metadata), { failAt, phase: "sidecar-promotion", temporaryRemover });
+      await writeClaudeConfig(paths.configPath, encodeJson(value), { failAt, phase: "config-promotion" });
       await assertExistingOwned({ servers: (await loadConfig(paths.configPath)).value.mcpServers, paths, canonicalOrigin });
       failIfRequested(failAt, "validation");
       failIfRequested(failAt, "cleanup");
       return paths;
-    });
+    }, { temporaryRemover });
 }
 
 export async function switchClaudeOAuth({
   profileDir,
   canonicalOrigin,
   failAt,
+  temporaryRemover,
 } = {}) {
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
     throw new Error("Claude OAuth switch requires the canonical HTTPS MCP origin.");
@@ -376,7 +396,7 @@ export async function switchClaudeOAuth({
       const exists = await assertExistingOwned({ servers: value.mcpServers, paths, canonicalOrigin });
       if (exists) {
         delete value.mcpServers[CLAUDE_MANUAL_SERVER_NAME];
-        await atomicWrite(paths.configPath, encodeJson(value), { failAt, phase: "config-promotion" });
+        await writeClaudeConfig(paths.configPath, encodeJson(value), { failAt, phase: "config-promotion" });
       }
       failIfRequested(failAt, "cleanup");
       await rm(paths.helperPath, { force: true });
@@ -384,7 +404,7 @@ export async function switchClaudeOAuth({
       await rm(paths.sidecarPath, { force: true });
       failIfRequested(failAt, "cleanup-after-sidecar");
       return paths;
-    });
+    }, { temporaryRemover });
 }
 
 async function readManualToken() {
