@@ -211,6 +211,8 @@ test("Claude README documents the lower-capability explicit-space recovery witho
   assert.match(readme, /ambiguous Git.*never retry/i);
   assert.match(readme, /sh \.\/scripts\/connect-manual\.sh/);
   assert.match(readme, /sh \.\/scripts\/connect-oauth\.sh/);
+  assert.match(readme, /Windows[\s\S]*atomic visibility[\s\S]*in-process failure rollback/i);
+  assert.match(readme, /not.*power-loss durability/i);
 });
 
 test("Claude manual and OAuth command wrappers keep credentials out of arguments and history", async () => {

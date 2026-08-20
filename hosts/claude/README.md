@@ -20,6 +20,10 @@ and keeps a checksum-verified copy of the space helper beside that profile. It u
 `CLAUDE_CONFIG_DIR` when set; otherwise Claude's default config is `~/.claude.json` and the managed
 helper lives under `~/.claude/parley`. It refuses to overwrite a conflicting same-endpoint entry.
 
+On POSIX, each promoted profile file and rollback is fsynced with its parent directory. On Windows,
+the manager hardens the empty staging file to the current user's ACL before writing the token. Windows
+has atomic visibility and in-process failure rollback, but this is not a power-loss durability guarantee.
+
 To remove only the owned manual override and return to OAuth, run:
 
 ```powershell

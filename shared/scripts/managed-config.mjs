@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -10,6 +11,8 @@ export const CLAUDE_MANAGED_DIRECTORY = "parley";
 export const CLAUDE_HELPER_FILE = "claude-space-headers.mjs";
 export const CLAUDE_SIDECAR_FILE = "claude-manual-override.json";
 export const MAX_MANUAL_TOKEN_BYTES = 4_096;
+const WINDOWS_ACL_TIMEOUT_MS = 3_000;
+const WINDOWS_ACL_MAX_OUTPUT_BYTES = 4_096;
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -63,6 +66,115 @@ async function scrubTemporary(path) {
   }
 }
 
+function runBoundedProcess(command, args, { timeoutMs = WINDOWS_ACL_TIMEOUT_MS, shell = false } = {}) {
+  return new Promise((resolveResult, rejectResult) => {
+    let child;
+    let settled = false;
+    let timer;
+    const stdout = [];
+    const stderr = [];
+    let outputBytes = 0;
+    const settle = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const fail = (message) => {
+      try {
+        child?.kill();
+      } catch {
+        // The child is already gone; the bounded failure below remains authoritative.
+      }
+      settle(() => rejectResult(new Error(message)));
+    };
+    try {
+      child = spawn(command, args, {
+        shell,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      rejectResult(new Error("Could not run Windows owner-private ACL setup."));
+      return;
+    }
+    const collect = (target) => (chunk) => {
+      const bytes = Buffer.from(chunk);
+      outputBytes += bytes.byteLength;
+      if (outputBytes > WINDOWS_ACL_MAX_OUTPUT_BYTES) {
+        fail("Windows owner-private ACL setup produced excessive output.");
+        return;
+      }
+      target.push(bytes);
+    };
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", () => fail("Could not run Windows owner-private ACL setup."));
+    child.once("close", (code) => settle(() => resolveResult({
+      code,
+      stdout: Buffer.concat(stdout),
+      stderr: Buffer.concat(stderr),
+    })));
+    timer = setTimeout(() => fail("Windows owner-private ACL setup timed out."), timeoutMs);
+  });
+}
+
+function assertBoundedWindowsResult(result, command) {
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    !Number.isInteger(result.code) ||
+    !Buffer.isBuffer(result.stdout) ||
+    !Buffer.isBuffer(result.stderr) ||
+    result.stdout.byteLength + result.stderr.byteLength > WINDOWS_ACL_MAX_OUTPUT_BYTES ||
+    result.code !== 0
+  ) {
+    throw new Error(`Windows owner-private ACL setup failed while running ${command}.`);
+  }
+}
+
+async function hardenWindowsTemporary(path, { processRunner = runBoundedProcess } = {}) {
+  const whoami = await processRunner("whoami", ["/user", "/fo", "csv", "/nh"], {
+    shell: false,
+    timeoutMs: WINDOWS_ACL_TIMEOUT_MS,
+  });
+  assertBoundedWindowsResult(whoami, "whoami");
+  const match = /^"(?:[^"]|"")*","(S-1-\d+(?:-\d+)+)"\r?\n?$/u.exec(whoami.stdout.toString("utf8"));
+  if (match === null) {
+    throw new Error("Windows owner-private ACL setup could not verify the current user SID.");
+  }
+  const icacls = await processRunner("icacls", [path, "/inheritance:r", "/grant:r", `*${match[1]}:(F)`], {
+    shell: false,
+    timeoutMs: WINDOWS_ACL_TIMEOUT_MS,
+  });
+  assertBoundedWindowsResult(icacls, "icacls");
+}
+
+async function syncParentDirectory(path, { platform = process.platform, directoryOpener = open } = {}) {
+  if (platform === "win32") {
+    // Node has no portable directory fsync contract on Windows. Rename provides atomic visibility and the
+    // transaction provides in-process failure rollback; neither is a power-loss durability guarantee.
+    return;
+  }
+  let handle;
+  try {
+    handle = await directoryOpener(dirname(path), "r");
+    await handle.sync();
+  } finally {
+    if (handle !== undefined) {
+      await handle.close();
+    }
+  }
+}
+
+async function verifyPosixOwnerPrivate(handle) {
+  if (((await handle.stat()).mode & 0o077) !== 0) {
+    throw new Error("Refusing to stage Claude configuration outside owner-private permissions.");
+  }
+}
+
 async function atomicWrite(
   path,
   bytes,
@@ -74,6 +186,10 @@ async function atomicWrite(
     promoter = rename,
     onStaged,
     sensitive = false,
+    platform = process.platform,
+    directoryOpener = open,
+    processRunner = runBoundedProcess,
+    ownerPrivateVerifier = verifyPosixOwnerPrivate,
   } = {},
 ) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -81,12 +197,15 @@ async function atomicWrite(
   let handle;
   let temporaryCreated = false;
   let promoted = false;
+  let primaryError = null;
   try {
     handle = await open(temporary, "wx", 0o600);
     temporaryCreated = true;
     await handle.chmod(0o600);
-    if (process.platform !== "win32" && ((await handle.stat()).mode & 0o077) !== 0) {
-      throw new Error("Refusing to stage Claude configuration outside owner-private permissions.");
+    if (platform === "win32") {
+      await hardenWindowsTemporary(temporary, { processRunner });
+    } else {
+      await ownerPrivateVerifier(handle);
     }
     await temporaryWriter(handle, bytes);
     await handle.sync();
@@ -96,8 +215,12 @@ async function atomicWrite(
     failIfRequested(failAt, phase);
     await promoter(temporary, path);
     promoted = true;
-    await chmod(path, 0o600);
-  } finally {
+    await syncParentDirectory(path, { platform, directoryOpener });
+  } catch (error) {
+    primaryError = error;
+  }
+
+  {
     const cleanupErrors = [];
     if (handle !== undefined) {
       try {
@@ -119,10 +242,19 @@ async function atomicWrite(
       cleanupErrors.push(error);
     }
     if (cleanupErrors.length === 1) {
+      if (primaryError !== null) {
+        throw new AggregateError([primaryError, cleanupErrors[0]], "Configuration write and cleanup both failed.");
+      }
       throw cleanupErrors[0];
     }
     if (cleanupErrors.length > 1) {
-      throw new AggregateError(cleanupErrors, "Failed to clean staged configuration safely.");
+      throw new AggregateError(
+        primaryError === null ? cleanupErrors : [primaryError, ...cleanupErrors],
+        "Failed to clean staged configuration safely.",
+      );
+    }
+    if (primaryError !== null) {
+      throw primaryError;
     }
   }
 }
@@ -132,6 +264,11 @@ function configWriteOptions(configFileOps) {
     ...(configFileOps ?? {}),
     sensitive: true,
   };
+}
+
+function rollbackConfigFileOps(configFileOps) {
+  const { platform, directoryOpener, ownerPrivateVerifier, rollbackPromoter } = configFileOps ?? {};
+  return { platform, directoryOpener, ownerPrivateVerifier, promoter: rollbackPromoter };
 }
 
 async function writeClaudeConfig(path, bytes, { failAt, phase, configFileOps } = {}) {
@@ -150,9 +287,9 @@ async function restore(path, original, { temporaryRemover } = {}) {
   }
 }
 
-async function restoreClaudeConfig(path, original) {
+async function restoreClaudeConfig(path, original, { configFileOps } = {}) {
   if (original.exists) {
-    await writeClaudeConfig(path, original.bytes);
+    await writeClaudeConfig(path, original.bytes, { configFileOps: rollbackConfigFileOps(configFileOps) });
   } else {
     await rm(path, { force: true });
   }
@@ -334,9 +471,9 @@ async function assertExistingOwned({ servers, paths, canonicalOrigin }) {
   return true;
 }
 
-async function restoreAll(paths, originals, { temporaryRemover } = {}) {
+async function restoreAll(paths, originals, { temporaryRemover, configFileOps } = {}) {
   const results = await Promise.allSettled([
-    restoreClaudeConfig(paths.configPath, originals.config),
+    restoreClaudeConfig(paths.configPath, originals.config, { configFileOps }),
     restore(paths.helperPath, originals.helper, { temporaryRemover }),
     restore(paths.sidecarPath, originals.sidecar, { temporaryRemover }),
   ]);
@@ -384,7 +521,7 @@ async function acquireProfileLock(paths, { failAt } = {}) {
   };
 }
 
-async function runClaudeTransaction(paths, failAt, transition, { temporaryRemover } = {}) {
+async function runClaudeTransaction(paths, failAt, transition, { temporaryRemover, configFileOps } = {}) {
   const releaseLock = await acquireProfileLock(paths, { failAt });
   let originals = null;
   try {
@@ -401,7 +538,7 @@ async function runClaudeTransaction(paths, failAt, transition, { temporaryRemove
     let restoreError = null;
     if (originals !== null) {
       try {
-        await restoreAll(paths, originals, { temporaryRemover });
+        await restoreAll(paths, originals, { temporaryRemover, configFileOps });
       } catch (caught) {
         restoreError = caught;
       }
@@ -460,7 +597,7 @@ export async function applyClaudeManual({
       failIfRequested(failAt, "validation");
       failIfRequested(failAt, "cleanup");
       return paths;
-    }, { temporaryRemover });
+    }, { temporaryRemover, configFileOps });
 }
 
 export async function switchClaudeOAuth({
@@ -490,7 +627,7 @@ export async function switchClaudeOAuth({
       await rm(paths.sidecarPath, { force: true });
       failIfRequested(failAt, "cleanup-after-sidecar");
       return paths;
-    }, { temporaryRemover });
+    }, { temporaryRemover, configFileOps });
 }
 
 async function readManualToken() {

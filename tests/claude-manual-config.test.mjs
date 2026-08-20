@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -419,7 +419,11 @@ test("Claude config scrubs a retained staging file before a cleanup failure", as
           },
         },
       }),
-      /safely restore|config cleanup/i,
+      (error) => {
+        assert.equal(error instanceof AggregateError, true);
+        assert.match(error.errors.map(({ message }) => message).join("\n"), /config cleanup/i);
+        return true;
+      },
     );
     assert.notEqual(retainedTemporary, null);
     const residue = await readFile(retainedTemporary);
@@ -478,6 +482,164 @@ test("Claude rollback restores config, changed helper, and distinct sidecar afte
       const residue = await readFile(path, "utf8");
       assert.doesNotMatch(residue, new RegExp(attemptedToken));
     }
+  });
+});
+
+test("Claude config syncs its parent after every POSIX promotion, including rollback", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath }) => {
+    const events = [];
+    const configFileOps = {
+      platform: "linux",
+      ownerPrivateVerifier: async () => {},
+      temporaryWriter: async (handle, bytes) => {
+        events.push("write");
+        await handle.writeFile(bytes);
+      },
+      promoter: async (temporary, target) => {
+        events.push("rename");
+        await rename(temporary, target);
+      },
+      rollbackPromoter: async (temporary, target) => {
+        events.push("rollback-rename");
+        await rename(temporary, target);
+      },
+      directoryOpener: async (directory, flags) => {
+        events.push(`open:${directory}:${flags}`);
+        return {
+          sync: async () => events.push("directory-sync"),
+          close: async () => events.push("directory-close"),
+        };
+      },
+    };
+
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: runtimeSentinel("i"),
+        helperSourcePath,
+        canonicalOrigin,
+        failAt: "validation",
+        configFileOps,
+      }),
+      /injected validation failure/i,
+    );
+    assert.deepEqual(events.map((event) => event.replace(/^open:.*:r$/, "directory-open")), [
+      "write",
+      "rename",
+      "directory-open",
+      "directory-sync",
+      "directory-close",
+      "rollback-rename",
+      "directory-open",
+      "directory-sync",
+      "directory-close",
+    ]);
+  });
+});
+
+test("Claude config preserves a primary staging error alongside cleanup failure", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const original = await readFile(configPath);
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: runtimeSentinel("j"),
+        helperSourcePath,
+        canonicalOrigin,
+        configFileOps: {
+          temporaryWriter: async () => {
+            throw new Error("Injected primary config staging failure.");
+          },
+          temporaryRemover: async () => {
+            throw new Error("Injected config cleanup failure.");
+          },
+        },
+      }),
+      (error) => {
+        assert.equal(error instanceof AggregateError, true);
+        assert.match(error.errors[0].message, /primary config staging/i);
+        assert.match(error.errors[1].message, /config cleanup/i);
+        return true;
+      },
+    );
+    assert.deepEqual(await readFile(configPath), original);
+  });
+});
+
+test("Claude config hardens a Windows staging ACL before bearer write", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath }) => {
+    const token = runtimeSentinel("k");
+    const calls = [];
+    await applyClaudeManual({
+      profileDir,
+      token,
+      helperSourcePath,
+      canonicalOrigin,
+      configFileOps: {
+        platform: "win32",
+        processRunner: async (command, args, options) => {
+          calls.push({ command, args, options });
+          assert.equal(options.shell, false);
+          assert.equal(options.timeoutMs, 3_000);
+          assert.equal(args.some((argument) => String(argument).includes(token)), false);
+          if (command === "whoami") {
+            assert.deepEqual(args, ["/user", "/fo", "csv", "/nh"]);
+            return { code: 0, stdout: Buffer.from('"WORK\\user","S-1-5-21-1-2-3-4"\r\n'), stderr: Buffer.alloc(0) };
+          }
+          assert.equal(command, "icacls");
+          assert.deepEqual(args.slice(1), ["/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-4:(F)"]);
+          assert.equal((await readFile(args[0])).byteLength, 0);
+          return { code: 0, stdout: Buffer.from("Successfully processed 1 files\r\n"), stderr: Buffer.alloc(0) };
+        },
+        temporaryWriter: async (handle, bytes) => {
+          assert.deepEqual(calls.map(({ command }) => command), ["whoami", "icacls"]);
+          await handle.writeFile(bytes);
+        },
+      },
+    });
+    assert.deepEqual(calls.map(({ command }) => command), ["whoami", "icacls"]);
+  });
+});
+
+test("Claude config fails closed before bearer write when Windows ACL hardening fails", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const token = runtimeSentinel("l");
+    const original = await readFile(configPath);
+    let retainedTemporary = null;
+    let attemptedWrite = false;
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token,
+        helperSourcePath,
+        canonicalOrigin,
+        configFileOps: {
+          platform: "win32",
+          processRunner: async (command) => {
+            if (command === "whoami") {
+              return { code: 0, stdout: Buffer.from('"WORK\\user","S-1-5-21-1-2-3-4"\r\n'), stderr: Buffer.alloc(0) };
+            }
+            return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("access denied") };
+          },
+          temporaryWriter: async () => {
+            attemptedWrite = true;
+          },
+          temporaryRemover: async (path) => {
+            retainedTemporary = path;
+            throw new Error("Injected ACL cleanup failure.");
+          },
+        },
+      }),
+      (error) => {
+        assert.equal(error instanceof AggregateError, true);
+        assert.match(error.errors.map(({ message }) => message).join("\n"), /Windows owner-private ACL|ACL cleanup/i);
+        return true;
+      },
+    );
+    assert.equal(attemptedWrite, false);
+    assert.notEqual(retainedTemporary, null);
+    assert.equal((await readFile(retainedTemporary)).byteLength, 0);
+    assert.deepEqual(await readFile(configPath), original);
   });
 });
 
