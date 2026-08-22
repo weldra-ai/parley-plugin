@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyClaudeManual,
@@ -15,6 +15,28 @@ import {
 
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
+const hangingAclChildPath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "windows-acl-hanging-child.mjs");
+const windowsTestSid = "S-1-5-21-1-2-3-4";
+
+function verifiedWindowsAcl(sid = windowsTestSid, accessRules) {
+  const ownerRule = {
+    sid,
+    type: "Allow",
+    rights: 2_032_127,
+    inherited: false,
+    inheritance: 0,
+    propagation: 0,
+  };
+  return {
+    code: 0,
+    stdout: Buffer.from(`${JSON.stringify({
+      currentUserSid: sid,
+      daclProtected: true,
+      accessRules: accessRules ?? [ownerRule],
+    })}\n`),
+    stderr: Buffer.alloc(0),
+  };
+}
 
 function runtimeSentinel(letter = "a") {
   return ["p", "n"].join("") + "_" + letter.repeat(24);
@@ -566,10 +588,11 @@ test("Claude config preserves a primary staging error alongside cleanup failure"
   });
 });
 
-test("Claude config hardens a Windows staging ACL before bearer write", async () => {
+test("Claude config validates a fully-qualified Windows ACL command and its verified SID DACL before bearer write", async () => {
   await withProfile(async ({ profileDir, helperSourcePath }) => {
     const token = runtimeSentinel("k");
     const calls = [];
+    const systemPath = process.execPath;
     await applyClaudeManual({
       profileDir,
       token,
@@ -577,31 +600,27 @@ test("Claude config hardens a Windows staging ACL before bearer write", async ()
       canonicalOrigin,
       configFileOps: {
         platform: "win32",
+        windowsSystemPathResolver: async () => ({ executable: systemPath, prefixArgs: [] }),
         processRunner: async (command, args, options) => {
           calls.push({ command, args, options });
           assert.equal(options.shell, false);
           assert.equal(options.timeoutMs, 3_000);
+          assert.equal(command, systemPath);
+          assert.equal(isAbsolute(command), true);
           assert.equal(args.some((argument) => String(argument).includes(token)), false);
-          if (command === "whoami") {
-            assert.deepEqual(args, ["/user", "/fo", "csv", "/nh"]);
-            return { code: 0, stdout: Buffer.from('"WORK\\user","S-1-5-21-1-2-3-4"\r\n'), stderr: Buffer.alloc(0) };
-          }
-          assert.equal(command, "icacls");
-          assert.deepEqual(args.slice(1), ["/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-4:(F)"]);
-          assert.equal((await readFile(args[0])).byteLength, 0);
-          return { code: 0, stdout: Buffer.from("Successfully processed 1 files\r\n"), stderr: Buffer.alloc(0) };
+          return verifiedWindowsAcl();
         },
         temporaryWriter: async (handle, bytes) => {
-          assert.deepEqual(calls.map(({ command }) => command), ["whoami", "icacls"]);
+          assert.equal(calls.length, 1);
           await handle.writeFile(bytes);
         },
       },
     });
-    assert.deepEqual(calls.map(({ command }) => command), ["whoami", "icacls"]);
+    assert.equal(calls.length, 1);
   });
 });
 
-test("Claude config fails closed before bearer write when Windows ACL hardening fails", async () => {
+test("Claude config fails closed before bearer write when a successful Windows ACL command reports a broad DACL", async () => {
   await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
     const token = runtimeSentinel("l");
     const original = await readFile(configPath);
@@ -615,30 +634,136 @@ test("Claude config fails closed before bearer write when Windows ACL hardening 
         canonicalOrigin,
         configFileOps: {
           platform: "win32",
-          processRunner: async (command) => {
-            if (command === "whoami") {
-              return { code: 0, stdout: Buffer.from('"WORK\\user","S-1-5-21-1-2-3-4"\r\n'), stderr: Buffer.alloc(0) };
-            }
-            return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("access denied") };
-          },
+          windowsSystemPathResolver: async () => ({ executable: process.execPath, prefixArgs: [] }),
+          processRunner: async () => verifiedWindowsAcl(windowsTestSid, [
+            {
+              sid: windowsTestSid,
+              type: "Allow",
+              rights: 2_032_127,
+              inherited: false,
+              inheritance: 0,
+              propagation: 0,
+            },
+            {
+              sid: "S-1-1-0",
+              type: "Allow",
+              rights: 2_032_127,
+              inherited: false,
+              inheritance: 0,
+              propagation: 0,
+            },
+          ]),
           temporaryWriter: async () => {
             attemptedWrite = true;
           },
           temporaryRemover: async (path) => {
             retainedTemporary = path;
-            throw new Error("Injected ACL cleanup failure.");
+            throw new Error("Injected cleanup failure.");
           },
         },
       }),
       (error) => {
         assert.equal(error instanceof AggregateError, true);
-        assert.match(error.errors.map(({ message }) => message).join("\n"), /Windows owner-private ACL|ACL cleanup/i);
+        assert.match(error.errors.map(({ message }) => message).join("\n"), /DACL/i);
         return true;
       },
     );
     assert.equal(attemptedWrite, false);
     assert.notEqual(retainedTemporary, null);
     assert.equal((await readFile(retainedTemporary)).byteLength, 0);
+    assert.deepEqual(await readFile(configPath), original);
+  });
+});
+
+test("Claude config rejects inconsistent Windows system roots before the bearer writer runs", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const original = await readFile(configPath);
+    let attemptedWrite = false;
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: runtimeSentinel("m"),
+        helperSourcePath,
+        canonicalOrigin,
+        configFileOps: {
+          platform: "win32",
+          windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "D:\\Windows" },
+          processRunner: async () => {
+            assert.fail("an inconsistent system root must fail before launching an ACL subprocess");
+          },
+          temporaryWriter: async () => {
+            attemptedWrite = true;
+          },
+        },
+      }),
+      /SystemRoot.*windir/i,
+    );
+    assert.equal(attemptedWrite, false);
+    assert.deepEqual(await readFile(configPath), original);
+  });
+});
+
+test("Claude config reaps a real timed-out Windows ACL child before staging cleanup", async () => {
+  await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
+    const original = await readFile(configPath);
+    const releaseMarker = join(root, "acl-child-released");
+    let attemptedWrite = false;
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: runtimeSentinel("n"),
+        helperSourcePath,
+        canonicalOrigin,
+        configFileOps: {
+          platform: "win32",
+          windowsAclTimeoutMs: 250,
+          windowsAclTerminationGraceMs: 50,
+          windowsAclReapTimeoutMs: 1_000,
+          windowsSystemPathResolver: async () => ({
+            executable: process.execPath,
+            prefixArgs: [hangingAclChildPath, releaseMarker],
+          }),
+          temporaryWriter: async () => {
+            attemptedWrite = true;
+          },
+          temporaryRemover: async (path) => {
+            assert.equal(await readFile(releaseMarker, "utf8"), "released\n");
+            await rm(path, { force: true });
+          },
+        },
+      }),
+      /timed out/i,
+    );
+    assert.equal(attemptedWrite, false);
+    assert.deepEqual(await readFile(configPath), original);
+  });
+});
+
+test("Claude rollback preserves the Windows ACL runner and system-path seam", async () => {
+  await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
+    const original = await readFile(configPath);
+    const calls = [];
+    const systemPath = process.execPath;
+    await assert.rejects(
+      applyClaudeManual({
+        profileDir,
+        token: runtimeSentinel("o"),
+        helperSourcePath,
+        canonicalOrigin,
+        failAt: "validation",
+        configFileOps: {
+          platform: "win32",
+          windowsSystemPathResolver: async () => ({ executable: systemPath, prefixArgs: [] }),
+          processRunner: async (command) => {
+            assert.equal(command, systemPath);
+            calls.push(command);
+            return verifiedWindowsAcl();
+          },
+        },
+      }),
+      /injected validation failure/i,
+    );
+    assert.deepEqual(calls, [systemPath, systemPath]);
     assert.deepEqual(await readFile(configPath), original);
   });
 });

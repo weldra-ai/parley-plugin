@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, win32 as windowsPath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CLAUDE_MANUAL_SERVER_NAME = "parley-manual-override";
@@ -13,6 +13,9 @@ export const CLAUDE_SIDECAR_FILE = "claude-manual-override.json";
 export const MAX_MANUAL_TOKEN_BYTES = 4_096;
 const WINDOWS_ACL_TIMEOUT_MS = 3_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 4_096;
+const WINDOWS_ACL_TERMINATION_GRACE_MS = 250;
+const WINDOWS_ACL_REAP_TIMEOUT_MS = 1_000;
+const WINDOWS_FULL_CONTROL = 2_032_127;
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -66,11 +69,184 @@ async function scrubTemporary(path) {
   }
 }
 
-function runBoundedProcess(command, args, { timeoutMs = WINDOWS_ACL_TIMEOUT_MS, shell = false } = {}) {
+function boundedMilliseconds(value, fallback, label) {
+  const resolved = value === undefined ? fallback : value;
+  if (!Number.isInteger(resolved) || resolved <= 0 || resolved > 30_000) {
+    throw new Error(`${label} must be a bounded positive integer.`);
+  }
+  return resolved;
+}
+
+function windowsEnvironmentValues(environment, name) {
+  if (environment === null || typeof environment !== "object") {
+    throw new Error("Windows system-root environment must be an object.");
+  }
+  const values = [];
+  for (const [key, value] of Object.entries(environment)) {
+    if (key.toLowerCase() === name.toLowerCase()) {
+      values.push(value);
+    }
+  }
+  return values;
+}
+
+function normalizeWindowsSystemRoot(value, name) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value !== value.trim() ||
+    value.includes("\0") ||
+    /[\r\n]/u.test(value) ||
+    !/^[A-Za-z]:\\/u.test(value) ||
+    value.split(/[\\/]/u).some((part) => part === "." || part === "..")
+  ) {
+    throw new Error(`Windows ${name} must be an absolute, normalized system-root path.`);
+  }
+  const normalized = windowsPath.normalize(value).replace(/\\+$/u, "");
+  if (!/^[A-Za-z]:\\[^\\]+(?:\\[^\\]+)*$/u.test(normalized)) {
+    throw new Error(`Windows ${name} must be an absolute, normalized system-root path.`);
+  }
+  return normalized;
+}
+
+function trustedWindowsSystemContext(windowsEnvironment = process.env) {
+  const systemRootValues = windowsEnvironmentValues(windowsEnvironment, "SystemRoot");
+  const windirValues = windowsEnvironmentValues(windowsEnvironment, "windir");
+  if (systemRootValues.length !== 1 || windirValues.length !== 1) {
+    throw new Error("Windows SystemRoot and windir must each be set exactly once.");
+  }
+  const systemRoot = normalizeWindowsSystemRoot(systemRootValues[0], "SystemRoot");
+  const windir = normalizeWindowsSystemRoot(windirValues[0], "windir");
+  if (systemRoot.toLowerCase() !== windir.toLowerCase()) {
+    throw new Error("Windows SystemRoot and windir must identify the same system root.");
+  }
+  return {
+    systemRoot,
+    // Do not inherit the caller's environment: the ACL child has no reason to receive a credential.
+    childEnvironment: { SystemRoot: systemRoot, windir: systemRoot },
+  };
+}
+
+function defaultWindowsSystemPathResolver({ systemRoot }) {
+  return {
+    executable: windowsPath.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    prefixArgs: [],
+  };
+}
+
+function validatedWindowsExecutable(resolved, { requireSystemPowerShell, systemRoot }) {
+  if (
+    resolved === null ||
+    typeof resolved !== "object" ||
+    typeof resolved.executable !== "string" ||
+    !windowsPath.isAbsolute(resolved.executable) ||
+    !/^[A-Za-z]:\\/u.test(resolved.executable) ||
+    !Array.isArray(resolved.prefixArgs) ||
+    resolved.prefixArgs.some((argument) => typeof argument !== "string" || argument.includes("\0"))
+  ) {
+    throw new Error("Windows ACL setup requires one trusted fully-qualified system executable.");
+  }
+  const executable = windowsPath.normalize(resolved.executable);
+  if (requireSystemPowerShell) {
+    const expected = windowsPath.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    if (executable.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error("Windows ACL setup requires the trusted SystemRoot PowerShell executable.");
+    }
+  }
+  return { executable, prefixArgs: resolved.prefixArgs };
+}
+
+function powerShellLiteral(value) {
+  return `'${value.replace(/'/gu, "''")}'`;
+}
+
+function windowsAclProofCommand(path) {
+  const stagePath = powerShellLiteral(path);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$stagePath = ${stagePath}`,
+    "$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User",
+    "$file = [System.IO.FileInfo]::new($stagePath)",
+    "$acl = $file.GetAccessControl()",
+    "$acl.SetAccessRuleProtection($true, $false)",
+    "foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) { [void]$acl.RemoveAccessRuleSpecific($rule) }",
+    "$fullControl = [Security.AccessControl.FileSystemRights]::FullControl",
+    "$allow = [Security.AccessControl.AccessControlType]::Allow",
+    "$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentUser, $fullControl, $allow))",
+    "$file.SetAccessControl($acl)",
+    "$verified = $file.GetAccessControl()",
+    "$rules = @($verified.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { [ordered]@{ sid = $_.IdentityReference.Value; type = $_.AccessControlType.ToString(); rights = [int]$_.FileSystemRights; inherited = [bool]$_.IsInherited; inheritance = [int]$_.InheritanceFlags; propagation = [int]$_.PropagationFlags } })",
+    "[ordered]@{ currentUserSid = $currentUser.Value; ownerSid = $verified.GetOwner([Security.Principal.SecurityIdentifier]).Value; daclProtected = [bool]$verified.AreAccessRulesProtected; accessRules = $rules } | ConvertTo-Json -Compress -Depth 4",
+  ].join("; ");
+}
+
+function waitForClose(closePromise, timeoutMs) {
+  return new Promise((resolveResult) => {
+    const timer = setTimeout(() => resolveResult(false), timeoutMs);
+    closePromise.then(() => {
+      clearTimeout(timer);
+      resolveResult(true);
+    });
+  });
+}
+
+function waitForReapWindow(timeoutMs) {
+  return new Promise((resolveResult) => setTimeout(resolveResult, timeoutMs));
+}
+
+async function terminateAndReap(child, closePromise, { terminationGraceMs, reapTimeoutMs }) {
+  try {
+    child.kill();
+  } catch {
+    // The close wait below determines whether the process was already gone.
+  }
+  if (!await waitForClose(closePromise, terminationGraceMs)) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // A failed escalation still gets one bounded reaping wait.
+    }
+    if (!await waitForClose(closePromise, reapTimeoutMs)) {
+      return false;
+    }
+  }
+  // On Windows, close can precede a released descendant that inherited no tracked stdio. Keep the
+  // credential-free staging file empty through one bounded reap window before any cleanup proceeds.
+  await waitForReapWindow(reapTimeoutMs);
+  return true;
+}
+
+function runBoundedProcess(
+  command,
+  args,
+  {
+    timeoutMs = WINDOWS_ACL_TIMEOUT_MS,
+    terminationGraceMs = WINDOWS_ACL_TERMINATION_GRACE_MS,
+    reapTimeoutMs = WINDOWS_ACL_REAP_TIMEOUT_MS,
+    shell = false,
+    env,
+  } = {},
+) {
+  if (!windowsPath.isAbsolute(command) || shell !== false) {
+    return Promise.reject(new Error("Windows ACL setup requires a fully-qualified executable without a shell."));
+  }
+  const boundedTimeoutMs = boundedMilliseconds(timeoutMs, WINDOWS_ACL_TIMEOUT_MS, "Windows ACL timeout");
+  const boundedTerminationGraceMs = boundedMilliseconds(
+    terminationGraceMs,
+    WINDOWS_ACL_TERMINATION_GRACE_MS,
+    "Windows ACL termination grace",
+  );
+  const boundedReapTimeoutMs = boundedMilliseconds(reapTimeoutMs, WINDOWS_ACL_REAP_TIMEOUT_MS, "Windows ACL reaping timeout");
   return new Promise((resolveResult, rejectResult) => {
     let child;
     let settled = false;
     let timer;
+    let failureMessage = null;
+    let closeResult;
+    let closeResultResolve;
+    const closePromise = new Promise((resolveClose) => {
+      closeResultResolve = resolveClose;
+    });
     const stdout = [];
     const stderr = [];
     let outputBytes = 0;
@@ -82,18 +258,27 @@ function runBoundedProcess(command, args, { timeoutMs = WINDOWS_ACL_TIMEOUT_MS, 
       clearTimeout(timer);
       callback();
     };
-    const fail = (message) => {
-      try {
-        child?.kill();
-      } catch {
-        // The child is already gone; the bounded failure below remains authoritative.
+    const failAfterReap = (message) => {
+      if (failureMessage !== null) {
+        return;
       }
-      settle(() => rejectResult(new Error(message)));
+      failureMessage = message;
+      clearTimeout(timer);
+      void (async () => {
+        const reaped = await terminateAndReap(child, closePromise, {
+          terminationGraceMs: boundedTerminationGraceMs,
+          reapTimeoutMs: boundedReapTimeoutMs,
+        });
+        if (!reaped) {
+          settle(() => rejectResult(new Error(`${message} Windows ACL child could not be reaped after bounded escalation.`)));
+        }
+      })();
     };
     try {
       child = spawn(command, args, {
-        shell,
+        shell: false,
         windowsHide: true,
+        env,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {
@@ -104,20 +289,24 @@ function runBoundedProcess(command, args, { timeoutMs = WINDOWS_ACL_TIMEOUT_MS, 
       const bytes = Buffer.from(chunk);
       outputBytes += bytes.byteLength;
       if (outputBytes > WINDOWS_ACL_MAX_OUTPUT_BYTES) {
-        fail("Windows owner-private ACL setup produced excessive output.");
+        failAfterReap("Windows owner-private ACL setup produced excessive output.");
         return;
       }
       target.push(bytes);
     };
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
-    child.once("error", () => fail("Could not run Windows owner-private ACL setup."));
-    child.once("close", (code) => settle(() => resolveResult({
-      code,
-      stdout: Buffer.concat(stdout),
-      stderr: Buffer.concat(stderr),
-    })));
-    timer = setTimeout(() => fail("Windows owner-private ACL setup timed out."), timeoutMs);
+    child.once("error", () => failAfterReap("Could not run Windows owner-private ACL setup."));
+    child.once("close", (code) => {
+      closeResult = { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+      closeResultResolve(closeResult);
+      if (failureMessage !== null) {
+        settle(() => rejectResult(new Error(failureMessage)));
+        return;
+      }
+      settle(() => resolveResult(closeResult));
+    });
+    timer = setTimeout(() => failAfterReap("Windows owner-private ACL setup timed out."), boundedTimeoutMs);
   });
 }
 
@@ -135,21 +324,79 @@ function assertBoundedWindowsResult(result, command) {
   }
 }
 
-async function hardenWindowsTemporary(path, { processRunner = runBoundedProcess } = {}) {
-  const whoami = await processRunner("whoami", ["/user", "/fo", "csv", "/nh"], {
-    shell: false,
-    timeoutMs: WINDOWS_ACL_TIMEOUT_MS,
-  });
-  assertBoundedWindowsResult(whoami, "whoami");
-  const match = /^"(?:[^"]|"")*","(S-1-\d+(?:-\d+)+)"\r?\n?$/u.exec(whoami.stdout.toString("utf8"));
-  if (match === null) {
-    throw new Error("Windows owner-private ACL setup could not verify the current user SID.");
+function assertVerifiedWindowsAcl(result, { requireOwner }) {
+  let proof;
+  try {
+    proof = JSON.parse(result.stdout.toString("utf8"));
+  } catch {
+    throw new Error("Windows owner-private ACL setup produced no verifiable DACL proof.");
   }
-  const icacls = await processRunner("icacls", [path, "/inheritance:r", "/grant:r", `*${match[1]}:(F)`], {
-    shell: false,
-    timeoutMs: WINDOWS_ACL_TIMEOUT_MS,
+  if (
+    proof === null ||
+    Array.isArray(proof) ||
+    typeof proof !== "object" ||
+    typeof proof.currentUserSid !== "string" ||
+    !/^S-1-\d+(?:-\d+)+$/u.test(proof.currentUserSid) ||
+    (requireOwner && proof.ownerSid !== proof.currentUserSid) ||
+    proof.daclProtected !== true ||
+    !Array.isArray(proof.accessRules) ||
+    proof.accessRules.length !== 1
+  ) {
+    throw new Error("Windows owner-private ACL verification rejected the staged DACL.");
+  }
+  const [rule] = proof.accessRules;
+  if (
+    rule === null ||
+    typeof rule !== "object" ||
+    rule.sid !== proof.currentUserSid ||
+    rule.type !== "Allow" ||
+    rule.rights !== WINDOWS_FULL_CONTROL ||
+    rule.inherited !== false ||
+    rule.inheritance !== 0 ||
+    rule.propagation !== 0
+  ) {
+    throw new Error("Windows owner-private ACL verification rejected the staged DACL.");
+  }
+}
+
+async function hardenWindowsTemporary(
+  path,
+  {
+    processRunner = runBoundedProcess,
+    windowsSystemPathResolver = defaultWindowsSystemPathResolver,
+    windowsEnvironment = process.env,
+    windowsAclTimeoutMs,
+    windowsAclTerminationGraceMs,
+    windowsAclReapTimeoutMs,
+  } = {},
+) {
+  const { systemRoot, childEnvironment } = trustedWindowsSystemContext(windowsEnvironment);
+  const resolved = await windowsSystemPathResolver({ systemRoot });
+  const { executable, prefixArgs } = validatedWindowsExecutable(resolved, {
+    requireSystemPowerShell: windowsSystemPathResolver === defaultWindowsSystemPathResolver,
+    systemRoot,
   });
-  assertBoundedWindowsResult(icacls, "icacls");
+  const script = windowsAclProofCommand(path);
+  const result = await processRunner(executable, [
+    ...prefixArgs,
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64"),
+  ], {
+    shell: false,
+    timeoutMs: boundedMilliseconds(windowsAclTimeoutMs, WINDOWS_ACL_TIMEOUT_MS, "Windows ACL timeout"),
+    terminationGraceMs: boundedMilliseconds(
+      windowsAclTerminationGraceMs,
+      WINDOWS_ACL_TERMINATION_GRACE_MS,
+      "Windows ACL termination grace",
+    ),
+    reapTimeoutMs: boundedMilliseconds(windowsAclReapTimeoutMs, WINDOWS_ACL_REAP_TIMEOUT_MS, "Windows ACL reaping timeout"),
+    env: childEnvironment,
+  });
+  assertBoundedWindowsResult(result, executable);
+  assertVerifiedWindowsAcl(result, { requireOwner: windowsSystemPathResolver === defaultWindowsSystemPathResolver });
 }
 
 async function syncParentDirectory(path, { platform = process.platform, directoryOpener = open } = {}) {
@@ -189,6 +436,11 @@ async function atomicWrite(
     platform = process.platform,
     directoryOpener = open,
     processRunner = runBoundedProcess,
+    windowsSystemPathResolver = defaultWindowsSystemPathResolver,
+    windowsEnvironment = process.env,
+    windowsAclTimeoutMs,
+    windowsAclTerminationGraceMs,
+    windowsAclReapTimeoutMs,
     ownerPrivateVerifier = verifyPosixOwnerPrivate,
   } = {},
 ) {
@@ -202,9 +454,16 @@ async function atomicWrite(
     handle = await open(temporary, "wx", 0o600);
     temporaryCreated = true;
     await handle.chmod(0o600);
-    if (platform === "win32") {
-      await hardenWindowsTemporary(temporary, { processRunner });
-    } else {
+    if (platform === "win32" && sensitive) {
+      await hardenWindowsTemporary(temporary, {
+        processRunner,
+        windowsSystemPathResolver,
+        windowsEnvironment,
+        windowsAclTimeoutMs,
+        windowsAclTerminationGraceMs,
+        windowsAclReapTimeoutMs,
+      });
+    } else if (platform !== "win32") {
       await ownerPrivateVerifier(handle);
     }
     await temporaryWriter(handle, bytes);
@@ -267,8 +526,30 @@ function configWriteOptions(configFileOps) {
 }
 
 function rollbackConfigFileOps(configFileOps) {
-  const { platform, directoryOpener, ownerPrivateVerifier, rollbackPromoter } = configFileOps ?? {};
-  return { platform, directoryOpener, ownerPrivateVerifier, promoter: rollbackPromoter };
+  const {
+    platform,
+    directoryOpener,
+    ownerPrivateVerifier,
+    rollbackPromoter,
+    processRunner,
+    windowsSystemPathResolver,
+    windowsEnvironment,
+    windowsAclTimeoutMs,
+    windowsAclTerminationGraceMs,
+    windowsAclReapTimeoutMs,
+  } = configFileOps ?? {};
+  return {
+    platform,
+    directoryOpener,
+    ownerPrivateVerifier,
+    promoter: rollbackPromoter,
+    processRunner,
+    windowsSystemPathResolver,
+    windowsEnvironment,
+    windowsAclTimeoutMs,
+    windowsAclTerminationGraceMs,
+    windowsAclReapTimeoutMs,
+  };
 }
 
 async function writeClaudeConfig(path, bytes, { failAt, phase, configFileOps } = {}) {
@@ -521,6 +802,13 @@ async function acquireProfileLock(paths, { failAt } = {}) {
   };
 }
 
+function flattenErrors(error) {
+  if (error instanceof AggregateError) {
+    return error.errors.flatMap(flattenErrors);
+  }
+  return [error];
+}
+
 async function runClaudeTransaction(paths, failAt, transition, { temporaryRemover, configFileOps } = {}) {
   const releaseLock = await acquireProfileLock(paths, { failAt });
   let originals = null;
@@ -549,11 +837,19 @@ async function runClaudeTransaction(paths, failAt, transition, { temporaryRemove
     } catch (caught) {
       releaseError = caught;
     }
-    if (restoreError !== null) {
-      throw new Error("Parley could not safely restore the selected Claude profile after a failed change. Check .claude.json before retrying.");
-    }
-    if (releaseError !== null) {
-      throw new Error("The selected Claude profile was restored, but .claude-manual-config.lock could not be removed. After confirming no setup is running, remove that stale lock and retry.");
+    if (restoreError !== null || releaseError !== null) {
+      const rollbackErrors = flattenErrors(error);
+      if (restoreError !== null) {
+        rollbackErrors.push(...flattenErrors(restoreError));
+      }
+      if (releaseError !== null) {
+        rollbackErrors.push(...flattenErrors(releaseError));
+      }
+      const primaryMessage = error instanceof Error ? error.message : "the requested Claude configuration change";
+      throw new AggregateError(
+        rollbackErrors,
+        `Claude configuration change failed (${primaryMessage}); Parley could not safely restore the selected Claude profile after a failed change.`,
+      );
     }
     throw error;
   }
