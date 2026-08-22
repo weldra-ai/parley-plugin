@@ -16,6 +16,7 @@ const WINDOWS_ACL_MAX_OUTPUT_BYTES = 4_096;
 const WINDOWS_ACL_TERMINATION_GRACE_MS = 250;
 const WINDOWS_ACL_REAP_TIMEOUT_MS = 1_000;
 const WINDOWS_FULL_CONTROL = 2_032_127;
+const UNSAFE_CLAUDE_ROLLBACK_MESSAGE = "Parley could not safely restore the selected Claude profile after a failed change. Check .claude.json before retrying.";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -242,6 +243,7 @@ function runBoundedProcess(
     let settled = false;
     let timer;
     let failureMessage = null;
+    let failureCompletion = null;
     let closeResult;
     let closeResultResolve;
     const closePromise = new Promise((resolveClose) => {
@@ -259,20 +261,26 @@ function runBoundedProcess(
       callback();
     };
     const failAfterReap = (message) => {
-      if (failureMessage !== null) {
-        return;
+      if (failureMessage !== null || settled) {
+        return failureCompletion;
       }
       failureMessage = message;
       clearTimeout(timer);
-      void (async () => {
-        const reaped = await terminateAndReap(child, closePromise, {
+      failureCompletion = terminateAndReap(child, closePromise, {
           terminationGraceMs: boundedTerminationGraceMs,
           reapTimeoutMs: boundedReapTimeoutMs,
-        });
-        if (!reaped) {
+        })
+        .then((reaped) => {
+          if (!reaped) {
+            settle(() => rejectResult(new Error(`${message} Windows ACL child could not be reaped after bounded escalation.`)));
+            return;
+          }
+          settle(() => rejectResult(new Error(message)));
+        })
+        .catch(() => {
           settle(() => rejectResult(new Error(`${message} Windows ACL child could not be reaped after bounded escalation.`)));
-        }
-      })();
+        });
+      return failureCompletion;
     };
     try {
       child = spawn(command, args, {
@@ -301,7 +309,6 @@ function runBoundedProcess(
       closeResult = { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
       closeResultResolve(closeResult);
       if (failureMessage !== null) {
-        settle(() => rejectResult(new Error(failureMessage)));
         return;
       }
       settle(() => resolveResult(closeResult));
@@ -848,7 +855,7 @@ async function runClaudeTransaction(paths, failAt, transition, { temporaryRemove
       const primaryMessage = error instanceof Error ? error.message : "the requested Claude configuration change";
       throw new AggregateError(
         rollbackErrors,
-        `Claude configuration change failed (${primaryMessage}); Parley could not safely restore the selected Claude profile after a failed change.`,
+        `Claude configuration change failed (${primaryMessage}); ${UNSAFE_CLAUDE_ROLLBACK_MESSAGE}`,
       );
     }
     throw error;
@@ -987,11 +994,16 @@ async function main() {
 function publicCliError(error) {
   const message = error instanceof Error ? error.message : "";
   if (
+    message === UNSAFE_CLAUDE_ROLLBACK_MESSAGE ||
+    message.endsWith(`; ${UNSAFE_CLAUDE_ROLLBACK_MESSAGE}`)
+  ) {
+    return UNSAFE_CLAUDE_ROLLBACK_MESSAGE;
+  }
+  if (
     message === "Manual token input is invalid." ||
     message.startsWith("The selected Claude profile's .claude.json") ||
     message.startsWith("Another Parley Claude configuration change holds .claude-manual-config.lock") ||
-    message.startsWith("The selected Claude profile was restored, but .claude-manual-config.lock") ||
-    message.startsWith("Parley could not safely restore the selected Claude profile")
+    message.startsWith("The selected Claude profile was restored, but .claude-manual-config.lock")
   ) {
     return message;
   }

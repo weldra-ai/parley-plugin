@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyClaudeManual,
   claudeManagedPaths,
@@ -290,6 +290,33 @@ test("Claude manager reports a conflict and active lock with token-safe next act
     assert.match(lockStderr, /\.claude-manual-config\.lock/i);
     assert.match(lockStderr, /retry/i);
     assert.doesNotMatch(lockStderr, new RegExp(token));
+  });
+});
+
+test("Claude CLI keeps the unsafe rollback remedy for nested aggregate failures without exposing causes", async () => {
+  await withProfile(async ({ root }) => {
+    const probePath = join(root, "managed-config-cli-error-probe.mjs");
+    const source = await readFile(managerPath, "utf8");
+    await writeFile(probePath, `${source}\nexport { publicCliError };\n`);
+    const { publicCliError } = await import(pathToFileURL(probePath).href);
+    const token = runtimeSentinel("rollback");
+    const internalPath = join(root, "profile", "parley", "retained-stage.tmp");
+    const unsafeRollback = new AggregateError(
+      [new AggregateError([new Error(`restore failed for ${internalPath} with ${token}`)], "nested restoration failure")],
+      "Claude configuration change failed (injected transition failure); Parley could not safely restore the selected Claude profile after a failed change. Check .claude.json before retrying.",
+    );
+
+    const publicMessage = publicCliError(unsafeRollback);
+    assert.equal(
+      publicMessage,
+      "Parley could not safely restore the selected Claude profile after a failed change. Check .claude.json before retrying.",
+    );
+    assert.doesNotMatch(publicMessage, new RegExp(token));
+    assert.doesNotMatch(publicMessage, new RegExp(internalPath.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&")));
+    assert.equal(
+      publicCliError(new AggregateError([new Error(`restored ${token}`)], "Configuration write and cleanup both failed.")),
+      "Parley Claude configuration could not be updated. No changes were kept.",
+    );
   });
 });
 
@@ -703,11 +730,12 @@ test("Claude config rejects inconsistent Windows system roots before the bearer 
   });
 });
 
-test("Claude config reaps a real timed-out Windows ACL child before staging cleanup", async () => {
+test("Claude config reaps a real timed-out Windows ACL child before staging cleanup when its descendant has ignored stdio", async () => {
   await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
     const original = await readFile(configPath);
     const releaseMarker = join(root, "acl-child-released");
     let attemptedWrite = false;
+    let cleanupObservedRelease = false;
     await assert.rejects(
       applyClaudeManual({
         profileDir,
@@ -716,7 +744,7 @@ test("Claude config reaps a real timed-out Windows ACL child before staging clea
         canonicalOrigin,
         configFileOps: {
           platform: "win32",
-          windowsAclTimeoutMs: 250,
+          windowsAclTimeoutMs: 500,
           windowsAclTerminationGraceMs: 50,
           windowsAclReapTimeoutMs: 1_000,
           windowsSystemPathResolver: async () => ({
@@ -727,7 +755,11 @@ test("Claude config reaps a real timed-out Windows ACL child before staging clea
             attemptedWrite = true;
           },
           temporaryRemover: async (path) => {
-            assert.equal(await readFile(releaseMarker, "utf8"), "released\n");
+            try {
+              cleanupObservedRelease = (await readFile(releaseMarker, "utf8")) === "released\n";
+            } catch {
+              cleanupObservedRelease = false;
+            }
             await rm(path, { force: true });
           },
         },
@@ -735,6 +767,7 @@ test("Claude config reaps a real timed-out Windows ACL child before staging clea
       /timed out/i,
     );
     assert.equal(attemptedWrite, false);
+    assert.equal(cleanupObservedRelease, true, "cleanup must wait for the production reaping window, not inherited pipes");
     assert.deepEqual(await readFile(configPath), original);
   });
 });
