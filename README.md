@@ -25,9 +25,11 @@ node scripts/certify-hosts.mjs --backend-sha <40-lowercase-hex> --plugin-tag v<p
 
 The build produces three versioned ZIP artifacts, their SHA-256 checksum files, and materialized native roots in `dist/`. The package version is the one source of artifact version truth.
 
-`certify-hosts.mjs` validates only locally built artifacts, runs the secret scan and native validators,
-and writes an **unsigned local artifact inventory**. It does not authenticate a host, create a real signed
-report, or satisfy the required stage, production, cross-agent, beta, signing, publication, or rollback gates.
+`certify-hosts.mjs` snapshots the default local `dist/` archives and materialized trees, then validates,
+secret-scans, native-validates, and hashes those same private snapshot bytes before writing an **unsigned
+local artifact inventory**. It refuses custom artifact directories. It does not authenticate a host, create a
+real signed report, or satisfy the required stage, production, cross-agent, beta, signing, publication, or
+rollback gates.
 
 ## Release signer configuration
 
@@ -40,4 +42,7 @@ The workflow imports that public key into an isolated temporary GnuPG home, reje
 
 ## Compatibility status
 
-`compatibility.json` records only the supported host surface and its enforcement posture. It intentionally makes no host-version certification claim until the host-specific tasks complete live validation.
+`compatibility.json` records provisional tested-version, operating-system, and authentication declaration
+inputs plus enforcement posture. It is not host-version certification or release evidence. Before external
+release certification, an operator-trusted copy of the exact candidate declaration sets every matrix cell the
+signed backend report must cover.
