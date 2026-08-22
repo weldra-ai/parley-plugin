@@ -1017,11 +1017,12 @@ function tomlCodeLine(line) {
 
 function decodeTomlBasicKey(content) {
   let decoded = "";
+  const unparseable = () => ({ value: decoded, unparseable: true });
   for (let index = 0; index < content.length; index += 1) {
     const character = content[index];
     if (character !== "\\") {
       if (character.codePointAt(0) < 0x20 || character === "\u007f") {
-        return null;
+        return unparseable();
       }
       decoded += character;
       continue;
@@ -1043,28 +1044,30 @@ function decodeTomlBasicKey(content) {
     }
     const width = escaped === "u" ? 4 : escaped === "U" ? 8 : null;
     if (width === null) {
-      return null;
+      return unparseable();
     }
     const hexadecimal = content.slice(index + 1, index + 1 + width);
     if (hexadecimal.length !== width || !/^[0-9A-Fa-f]+$/u.test(hexadecimal)) {
-      return null;
+      return unparseable();
     }
     const codePoint = Number.parseInt(hexadecimal, 16);
     if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
-      return null;
+      return unparseable();
     }
     decoded += String.fromCodePoint(codePoint);
     index += width;
   }
-  return decoded;
+  return { value: decoded, unparseable: false };
 }
 
-function unparseableTomlKeyPath(segments, quoted, rawQuotedSegment) {
+function unparseableTomlKeyPath(segments, quoted, rawQuotedSegment, decodedPrefix) {
   const result = [...segments];
   if (
     result.length === 0 &&
-    typeof rawQuotedSegment === "string" &&
-    /^['"]mcp_servers(?:\\|['"]|$)/u.test(rawQuotedSegment)
+    (
+      (typeof decodedPrefix === "string" && decodedPrefix.startsWith("mcp_servers")) ||
+      (typeof rawQuotedSegment === "string" && /^['"]mcp_servers(?:\\|['"]|$)/u.test(rawQuotedSegment))
+    )
   ) {
     result.push("mcp_servers");
   }
@@ -1105,10 +1108,13 @@ function tomlKeyPath(value) {
         return unparseableTomlKeyPath(segments, true, value.slice(start));
       }
       const raw = value.slice(start, index);
-      segment = quote === '"' ? decodeTomlBasicKey(raw.slice(1, -1)) : raw.slice(1, -1);
-      if (segment === null) {
-        return unparseableTomlKeyPath(segments, true, raw);
+      const decoded = quote === '"'
+        ? decodeTomlBasicKey(raw.slice(1, -1))
+        : { value: raw.slice(1, -1), unparseable: false };
+      if (decoded.unparseable) {
+        return unparseableTomlKeyPath(segments, true, raw, decoded.value);
       }
+      segment = decoded.value;
       quoted = true;
     } else {
       const start = index;
@@ -1179,7 +1185,14 @@ function tomlTableKeyPath(line) {
 }
 
 function isAmbiguousCodexServerKeyPath(path) {
-  if (path === null || path.segments[0] !== "mcp_servers") {
+  if (path === null) {
+    return false;
+  }
+  // A malformed quoted key cannot be safely merged, even when its incomplete spelling looks unrelated.
+  if (path.unparseable && path.quoted) {
+    return true;
+  }
+  if (path.segments[0] !== "mcp_servers") {
     return false;
   }
   // This is deliberately not a general TOML merger. Any quoted root/child segment or a root-level
