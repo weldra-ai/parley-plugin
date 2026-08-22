@@ -1,6 +1,6 @@
 # Parley agent plugins
 
-This repository is the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. It is a local scaffold only: no marketplace entry, remote, or published release is created here.
+This repository is the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. It is a local scaffold only: no marketplace entry, remote, or published release is created here. The packages are not yet available; see [docs/CERTIFICATION.md](docs/CERTIFICATION.md) for the gates that must be completed first.
 
 ## Layout
 
@@ -18,11 +18,16 @@ pnpm test
 pnpm build
 pnpm validate
 pnpm scan-secrets
+node scripts/certify-hosts.mjs --backend-sha <40-lowercase-hex> --plugin-tag v<package-version> --output <local-output-path>
 ```
 
 `SOURCE_DATE_EPOCH` controls ZIP entry timestamps. When it is absent, the build uses the ZIP epoch so the output remains reproducible.
 
 The build produces three versioned ZIP artifacts, their SHA-256 checksum files, and materialized native roots in `dist/`. The package version is the one source of artifact version truth.
+
+`certify-hosts.mjs` validates only locally built artifacts, runs the secret scan and native validators,
+and writes an **unsigned local artifact inventory**. It does not authenticate a host, create a real signed
+report, or satisfy the required stage, production, cross-agent, beta, signing, publication, or rollback gates.
 
 ## Release signer configuration
 
