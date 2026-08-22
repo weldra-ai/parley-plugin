@@ -15,12 +15,15 @@ export const CODEX_MANUAL_SERVER_NAME = "parley";
 export const MAX_MANUAL_TOKEN_BYTES = 4_096;
 const CODEX_MANAGED_BEGIN = "# BEGIN PARLEY MANAGED MANUAL OVERRIDE";
 const CODEX_MANAGED_END = "# END PARLEY MANAGED MANUAL OVERRIDE";
+const CODEX_HOST_VALIDATION_TIMEOUT_MS = 3_000;
+const CODEX_HOST_VALIDATION_MAX_OUTPUT_BYTES = 4_096;
 const WINDOWS_ACL_TIMEOUT_MS = 3_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 4_096;
 const WINDOWS_ACL_TERMINATION_GRACE_MS = 250;
 const WINDOWS_ACL_REAP_TIMEOUT_MS = 1_000;
 const WINDOWS_FULL_CONTROL = 2_032_127;
 const UNSAFE_CLAUDE_ROLLBACK_MESSAGE = "Parley could not safely restore the selected Claude profile after a failed change. Check .claude.json before retrying.";
+const UNSAFE_CODEX_ROLLBACK_MESSAGE = "Parley could not safely restore the selected Codex profile after a failed change. Check config.toml before retrying.";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -982,22 +985,162 @@ function codexBlockPattern(canonicalOrigin) {
   );
 }
 
+function tomlCodeLine(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "#") {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function tomlKeyPath(value) {
+  const segments = [];
+  let index = 0;
+  let quoted = false;
+  const whitespace = /\s/u;
+  const bare = /[A-Za-z0-9_-]/u;
+  const skipWhitespace = () => {
+    while (index < value.length && whitespace.test(value[index])) {
+      index += 1;
+    }
+  };
+  skipWhitespace();
+  while (index < value.length) {
+    let segment;
+    if (value[index] === '"' || value[index] === "'") {
+      const quote = value[index];
+      const start = index;
+      index += 1;
+      let escaped = false;
+      while (index < value.length) {
+        const character = value[index];
+        index += 1;
+        if (quote === '"' && escaped) {
+          escaped = false;
+        } else if (quote === '"' && character === "\\") {
+          escaped = true;
+        } else if (character === quote) {
+          break;
+        }
+      }
+      if (value[index - 1] !== quote) {
+        return null;
+      }
+      const raw = value.slice(start, index);
+      try {
+        segment = quote === '"' ? JSON.parse(raw) : raw.slice(1, -1);
+      } catch {
+        return null;
+      }
+      quoted = true;
+    } else {
+      const start = index;
+      while (index < value.length && bare.test(value[index])) {
+        index += 1;
+      }
+      if (start === index) {
+        return null;
+      }
+      segment = value.slice(start, index);
+    }
+    segments.push(segment);
+    skipWhitespace();
+    if (index === value.length) {
+      return { segments, quoted };
+    }
+    if (value[index] !== ".") {
+      return null;
+    }
+    index += 1;
+    skipWhitespace();
+  }
+  return null;
+}
+
+function tomlAssignmentKeyPath(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "=") {
+      return tomlKeyPath(line.slice(0, index));
+    }
+  }
+  return null;
+}
+
+function tomlTableKeyPath(line) {
+  const trimmed = line.trim();
+  const arrayTable = trimmed.startsWith("[[");
+  const opener = arrayTable ? "[[" : "[";
+  const closer = arrayTable ? "]]" : "]";
+  if (!trimmed.startsWith(opener) || !trimmed.endsWith(closer)) {
+    return null;
+  }
+  return tomlKeyPath(trimmed.slice(opener.length, trimmed.length - closer.length));
+}
+
+function isAmbiguousCodexServerKeyPath(path) {
+  if (path === null || path.segments[0] !== "mcp_servers") {
+    return false;
+  }
+  // This is deliberately not a general TOML merger. Any quoted root/child segment or a root-level
+  // mcp_servers construct is ambiguous ownership and therefore blocks a manual override.
+  if (path.quoted || path.segments.length < 2) {
+    return true;
+  }
+  return path.segments[1] === CODEX_MANUAL_SERVER_NAME;
+}
+
 function hasUnownedCodexParleyForm(text) {
-  if (/^\s*\[\s*mcp_servers\s*\.\s*(?:parley|["']parley["'])\s*\]\s*$/mu.test(text)) {
-    return true;
-  }
-  if (/^\s*mcp_servers\s*\.\s*(?:parley|["']parley["'])(?:\s*\.\s*[A-Za-z0-9_-]+)*\s*=/mu.test(text)) {
-    return true;
-  }
-  if (/^\s*mcp_servers\s*=\s*\{[\s\S]*?\bparley\s*=/mu.test(text)) {
-    return true;
-  }
-  let inMcpServers = false;
-  for (const line of text.split(/(?<=\n)/u)) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      inMcpServers = trimmed === "[mcp_servers]";
-    } else if (inMcpServers && /^parley\s*=/u.test(trimmed)) {
+  for (const line of text.split(/\r?\n/u)) {
+    const code = tomlCodeLine(line);
+    const trimmed = code.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    const path = trimmed.startsWith("[") ? tomlTableKeyPath(trimmed) : tomlAssignmentKeyPath(code);
+    if (isAmbiguousCodexServerKeyPath(path)) {
       return true;
     }
   }
@@ -1067,31 +1210,161 @@ async function restoreCodexConfig(path, original) {
   }
 }
 
-async function commitCodexConfig(paths, original, candidate, canonicalOrigin) {
-  const candidateBytes = Buffer.from(candidate, "utf8");
-  if (original.exists && original.bytes.equals(candidateBytes)) {
+function copiedEnvironmentValue(environment, name) {
+  const matches = Object.entries(environment)
+    .filter(([key, value]) => key.toLowerCase() === name.toLowerCase() && typeof value === "string")
+    .map(([, value]) => value);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function codexHostValidationEnvironment(profileDir, environment) {
+  const result = { CODEX_HOME: profileDir };
+  for (const name of ["PATH", "PATHEXT", "SystemRoot", "windir", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH", "TEMP", "TMP"]) {
+    const value = copiedEnvironmentValue(environment, name);
+    if (value !== undefined) {
+      result[name] = value;
+    }
+  }
+  return result;
+}
+
+function codexHostValidationInvocation(environment, platform) {
+  if (platform === "win32") {
+    const { systemRoot } = trustedWindowsSystemContext(environment);
+    return {
+      executable: windowsPath.join(systemRoot, "System32", "cmd.exe"),
+      args: ["/d", "/s", "/c", "codex mcp list"],
+    };
+  }
+  return { executable: "codex", args: ["mcp", "list"] };
+}
+
+function defaultCodexHostRunner({ executable, args, environment, timeoutMs }) {
+  return new Promise((resolveResult) => {
+    let child;
+    let settled = false;
+    let timedOut = false;
+    let outputBytes = 0;
+    const stdout = [];
+    const stderr = [];
+    let timer;
+    const finish = (result) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolveResult(result);
+      }
+    };
+    const fail = () => {
+      timedOut = true;
+      try {
+        child?.kill();
+      } catch {
+        // The bounded result below is intentionally token-safe.
+      }
+      finish({ code: null, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    };
+    try {
+      child = spawn(executable, args, {
+        env: environment,
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      finish({ code: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+      return;
+    }
+    const collect = (target) => (chunk) => {
+      if (settled) {
+        return;
+      }
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > CODEX_HOST_VALIDATION_MAX_OUTPUT_BYTES) {
+        fail();
+      } else {
+        target.push(Buffer.from(chunk));
+      }
+    };
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", fail);
+    child.once("close", (code) => {
+      finish({ code: timedOut ? null : code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    });
+    timer = setTimeout(fail, timeoutMs);
+  });
+}
+
+export async function validateCodexHostProfile({
+  profileDir,
+  configPath,
+  hostRunner = defaultCodexHostRunner,
+  environment = process.env,
+  platform = process.platform,
+} = {}) {
+  try {
+    const paths = codexManagedPaths(profileDir);
+    if (configPath !== paths.configPath || typeof hostRunner !== "function") {
+      throw new Error("invalid host validation input");
+    }
+    const invocation = codexHostValidationInvocation(environment, platform);
+    const result = await hostRunner({
+      ...invocation,
+      configPath: paths.configPath,
+      profileDir: paths.directory,
+      environment: codexHostValidationEnvironment(paths.directory, environment),
+      timeoutMs: CODEX_HOST_VALIDATION_TIMEOUT_MS,
+    });
+    if (result === null || typeof result !== "object" || result.code !== 0) {
+      throw new Error("host validator failed");
+    }
+  } catch {
+    throw new Error("Codex host configuration validation failed.");
+  }
+}
+
+async function commitCodexConfig(paths, original, candidate, canonicalOrigin, { expectedKind, hostValidator } = {}) {
+  const candidateBytes = candidate === null ? null : Buffer.from(candidate, "utf8");
+  if (candidateBytes !== null && original.exists && original.bytes.equals(candidateBytes)) {
+    const verified = decodeUtf8(await readRegularFile(paths.configPath, "Codex profile"), "Codex profile");
+    if (classifyCodexConfig(verified, canonicalOrigin).kind !== expectedKind) {
+      throw new Error("Codex managed configuration validation failed.");
+    }
+    await hostValidator({ configPath: paths.configPath, profileDir: paths.directory });
     return;
   }
   try {
-    await writeCodexConfig(paths.configPath, candidateBytes);
-    const verified = decodeUtf8(await readRegularFile(paths.configPath, "Codex profile"), "Codex profile");
-    if (classifyCodexConfig(verified, canonicalOrigin).kind === "unmanaged") {
+    if (candidateBytes === null) {
+      await rm(paths.configPath, { force: true });
+    } else {
+      await writeCodexConfig(paths.configPath, candidateBytes);
+    }
+    const current = await snapshot(paths.configPath);
+    const kind = current.exists
+      ? classifyCodexConfig(decodeUtf8(current.bytes, "Codex profile"), canonicalOrigin).kind
+      : "absent";
+    if (kind !== expectedKind) {
       throw new Error("Codex managed configuration validation failed.");
     }
+    await hostValidator({ configPath: paths.configPath, profileDir: paths.directory });
   } catch (error) {
     try {
       await restoreCodexConfig(paths.configPath, original);
     } catch {
-      throw new Error("Parley could not safely restore the selected Codex profile after a failed change. Check config.toml before retrying.");
+      throw new Error(UNSAFE_CODEX_ROLLBACK_MESSAGE);
     }
     throw error;
   }
 }
 
-export async function applyCodexManual({ profileDir, token, canonicalOrigin } = {}) {
+export async function applyCodexManual({ profileDir, token, canonicalOrigin, hostValidator = validateCodexHostProfile } = {}) {
   assertToken(token);
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
     throw new Error("Codex manual override requires the canonical HTTPS MCP origin.");
+  }
+  if (typeof hostValidator !== "function") {
+    throw new Error("Codex host configuration validation failed.");
   }
   const paths = profileDir === undefined ? resolveCodexPaths() : codexManagedPaths(profileDir);
   const original = await snapshot(paths.configPath);
@@ -1102,13 +1375,19 @@ export async function applyCodexManual({ profileDir, token, canonicalOrigin } = 
     token,
     originalWasAbsent: classification.kind === "managed" ? classification.originalWasAbsent : !original.exists,
   });
-  await commitCodexConfig(paths, original, candidate, canonicalOrigin);
+  await commitCodexConfig(paths, original, candidate, canonicalOrigin, {
+    expectedKind: "managed",
+    hostValidator,
+  });
   return paths;
 }
 
-export async function switchCodexOAuth({ profileDir, canonicalOrigin } = {}) {
+export async function switchCodexOAuth({ profileDir, canonicalOrigin, hostValidator = validateCodexHostProfile } = {}) {
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
     throw new Error("Codex OAuth switch requires the canonical HTTPS MCP origin.");
+  }
+  if (typeof hostValidator !== "function") {
+    throw new Error("Codex host configuration validation failed.");
   }
   const paths = profileDir === undefined ? resolveCodexPaths() : codexManagedPaths(profileDir);
   const original = await snapshot(paths.configPath);
@@ -1124,11 +1403,10 @@ export async function switchCodexOAuth({ profileDir, canonicalOrigin } = {}) {
     throw new Error("The selected Codex profile contains an unowned Parley MCP configuration. Review or remove that entry, then retry.");
   }
   const candidate = `${text.slice(0, classification.index)}${text.slice(classification.index + classification.bytes.length)}`;
-  if (classification.originalWasAbsent && candidate.length === 0) {
-    await rm(paths.configPath, { force: true });
-    return paths;
-  }
-  await commitCodexConfig(paths, original, candidate, canonicalOrigin);
+  await commitCodexConfig(paths, original, classification.originalWasAbsent && candidate.length === 0 ? null : candidate, canonicalOrigin, {
+    expectedKind: "absent",
+    hostValidator,
+  });
   return paths;
 }
 
@@ -1201,14 +1479,24 @@ async function main() {
   }
 }
 
-function publicCliError(error, host = "Claude") {
-  const message = error instanceof Error ? error.message : "";
-  if (
-    message === UNSAFE_CLAUDE_ROLLBACK_MESSAGE ||
-    message.endsWith(`; ${UNSAFE_CLAUDE_ROLLBACK_MESSAGE}`)
-  ) {
+function containsUnsafeRollback(error, message) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.message === message || error.message.endsWith(`; ${message}`)) {
+    return true;
+  }
+  return error instanceof AggregateError && error.errors.some((cause) => containsUnsafeRollback(cause, message));
+}
+
+export function publicCliError(error, host = "Claude") {
+  if (containsUnsafeRollback(error, UNSAFE_CLAUDE_ROLLBACK_MESSAGE)) {
     return UNSAFE_CLAUDE_ROLLBACK_MESSAGE;
   }
+  if (host === "Codex" && containsUnsafeRollback(error, UNSAFE_CODEX_ROLLBACK_MESSAGE)) {
+    return UNSAFE_CODEX_ROLLBACK_MESSAGE;
+  }
+  const message = error instanceof Error ? error.message : "";
   if (
     message === "Manual token input is invalid." ||
     message.startsWith("The selected Claude profile's .claude.json") ||

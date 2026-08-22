@@ -197,10 +197,25 @@ test("validator allows only the declared Gemini sensitive placeholder and fails 
     await buildArtifacts({ version: "0.1.0", sourceDir: root, outputDir });
     await assert.doesNotReject(validateArtifacts({ root, outputDir }));
 
-    manifest.settings = [];
-    await writeFile(join(root, "hosts", "gemini", "gemini-extension.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    await buildArtifacts({ version: "0.1.0", sourceDir: root, outputDir });
-    await assert.rejects(validateArtifacts({ root, outputDir }), /sensitive.*PARLEY_TOKEN|placeholder/i);
+    const mutations = [
+      ["literal bearer", (value) => { value.mcpServers.parley.headers.Authorization = "Bearer aaaaaaaaaaaaaaaaaaaa"; }],
+      ["undeclared substitution", (value) => { value.mcpServers.parley.headers.Authorization = "Bearer ${OTHER_TOKEN}"; }],
+      ["second header auth source", (value) => { value.mcpServers.parley.headers["X-Api-Key"] = "aaaaaaaaaaaaaaaaaaaa"; }],
+      ["second server", (value) => { value.mcpServers.other = { ...value.mcpServers.parley }; }],
+      ["missing oauth", (value) => { delete value.mcpServers.parley.oauth; }],
+      ["disabled oauth", (value) => { value.mcpServers.parley.oauth.enabled = false; }],
+      ["mismatched sensitive setting", (value) => { value.settings[0].envVar = "OTHER_TOKEN"; }],
+      ["missing sensitive setting", (value) => { value.settings = []; }],
+    ];
+    for (const [name, mutate] of mutations) {
+      await test(name, async () => {
+        const invalid = structuredClone(manifest);
+        mutate(invalid);
+        await writeFile(join(root, "hosts", "gemini", "gemini-extension.json"), `${JSON.stringify(invalid, null, 2)}\n`);
+        await buildArtifacts({ version: "0.1.0", sourceDir: root, outputDir });
+        await assert.rejects(validateArtifacts({ root, outputDir }), /sensitive|placeholder|authentication|logical parley|OAuth/i);
+      });
+    }
   });
 });
 

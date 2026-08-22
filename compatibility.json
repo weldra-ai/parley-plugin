@@ -5,7 +5,7 @@
   "hosts": {
     "codex": {
       "testedVersions": ["0.148.0"],
-      "operatingSystems": ["windows", "macos", "linux"],
+      "operatingSystems": ["windows"],
       "authModes": ["oauth", "manual"],
       "minimumSupport": {
         "minimumVersion": null,
@@ -27,7 +27,7 @@
     },
     "gemini": {
       "testedVersions": ["0.56.0"],
-      "operatingSystems": ["windows", "macos", "linux"],
+      "operatingSystems": ["windows"],
       "authModes": ["oauth", "manual"],
       "minimumSupport": {
         "minimumVersion": null,

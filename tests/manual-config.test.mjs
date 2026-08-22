@@ -14,6 +14,8 @@ function runtimeSentinel(letter = "m") {
   return ["p", "n"].join("") + "_" + letter.repeat(24);
 }
 
+async function acceptedCodexHostValidator() {}
+
 function countOccurrences(value, needle) {
   return value.split(needle).length - 1;
 }
@@ -91,7 +93,7 @@ test("Codex manual manager owns one private contiguous block and reverses it byt
     assert.equal(typeof manager.applyCodexManual, "function");
     assert.equal(typeof manager.switchCodexOAuth, "function");
 
-    await manager.applyCodexManual({ profileDir, token, canonicalOrigin });
+    await manager.applyCodexManual({ profileDir, token, canonicalOrigin, hostValidator: acceptedCodexHostValidator });
     const configured = await readFile(configPath, "utf8");
     assert.match(configured, /BEGIN PARLEY MANAGED MANUAL OVERRIDE/);
     assert.match(configured, /\[mcp_servers\.parley\]/);
@@ -101,10 +103,10 @@ test("Codex manual manager owns one private contiguous block and reverses it byt
     assert.equal(await temporaryFiles(root).then((files) => files.length), 0);
 
     const firstBytes = await readFile(configPath);
-    await manager.applyCodexManual({ profileDir, token, canonicalOrigin });
+    await manager.applyCodexManual({ profileDir, token, canonicalOrigin, hostValidator: acceptedCodexHostValidator });
     assert.deepEqual(await readFile(configPath), firstBytes);
 
-    await manager.switchCodexOAuth({ profileDir, canonicalOrigin });
+    await manager.switchCodexOAuth({ profileDir, canonicalOrigin, hostValidator: acceptedCodexHostValidator });
     assert.deepEqual(await readFile(configPath), Buffer.from(initialConfig));
     assert.equal(await temporaryFiles(root).then((files) => files.length), 0);
   });
@@ -115,6 +117,12 @@ test("Codex manual manager rejects each unowned Parley form without changing con
     "[mcp_servers.parley]\nurl = \"https://parley.weldra.dev/mcp\"\n",
     "mcp_servers.parley.url = \"https://parley.weldra.dev/mcp\"\n",
     "[mcp_servers]\nparley = { url = \"https://parley.weldra.dev/mcp\" }\n",
+    "[\"mcp_servers\".parley]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "[\"mcp_servers\".\"parley\"]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "\"mcp_servers\".parley.url = \"https://parley.weldra.dev/mcp\"\n",
+    "[mcp_servers]\n\"parley\" = { url = \"https://parley.weldra.dev/mcp\" }\n",
+    "mcp_servers = { \"parley\" = { url = \"https://parley.weldra.dev/mcp\" } }\n",
+    "mcp_servers = { \"p\\u0061rley\" = { url = \"https://parley.weldra.dev/mcp\" } }\n",
   ];
   for (const conflict of conflicts) {
     await context.test(conflict.split("\n", 1)[0], async () => {
@@ -122,13 +130,152 @@ test("Codex manual manager rejects each unowned Parley form without changing con
         await writeFile(configPath, `${initialConfig}${conflict}`);
         const original = await readFile(configPath);
         await assert.rejects(
-          manager.applyCodexManual({ profileDir, token: runtimeSentinel(), canonicalOrigin }),
+          manager.applyCodexManual({
+            profileDir,
+            token: runtimeSentinel(),
+            canonicalOrigin,
+            hostValidator: acceptedCodexHostValidator,
+          }),
           /unowned|conflict|Parley/i,
         );
         assert.deepEqual(await readFile(configPath), original);
       });
     });
   }
+});
+
+test("Codex manual manager invokes the selected-profile host validator after promotion", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    const calls = [];
+    await manager.applyCodexManual({
+      profileDir,
+      token: runtimeSentinel("v"),
+      canonicalOrigin,
+      hostValidator: async ({ configPath: validatedPath, profileDir: validatedProfile }) => {
+        calls.push({ validatedPath, validatedProfile, observed: await readFile(validatedPath) });
+      },
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].validatedPath, configPath);
+    assert.equal(calls[0].validatedProfile, profileDir);
+    assert.match(calls[0].observed.toString("utf8"), /BEGIN PARLEY MANAGED MANUAL OVERRIDE/);
+    assert.match((await readFile(configPath, "utf8")), /BEGIN PARLEY MANAGED MANUAL OVERRIDE/);
+    assert.ok((await readFile(configPath, "utf8")).startsWith(initialConfig));
+  });
+});
+
+test("Codex manual manager restores exact profile bytes when host validation rejects the promoted config", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    await assert.rejects(
+      manager.applyCodexManual({
+        profileDir,
+        token: runtimeSentinel("r"),
+        canonicalOrigin,
+        hostValidator: async () => {
+          throw new Error("synthetic host parse failure");
+        },
+      }),
+      /host parse failure/i,
+    );
+    assert.deepEqual(await readFile(configPath), Buffer.from(initialConfig));
+  });
+});
+
+test("Codex OAuth removal validates the selected candidate and restores its manual bytes on host failure", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    await manager.applyCodexManual({
+      profileDir,
+      token: runtimeSentinel("o"),
+      canonicalOrigin,
+      hostValidator: acceptedCodexHostValidator,
+    });
+    const manualBytes = await readFile(configPath);
+    const calls = [];
+    await assert.rejects(
+      manager.switchCodexOAuth({
+        profileDir,
+        canonicalOrigin,
+        hostValidator: async ({ configPath: validatedPath, profileDir: validatedProfile }) => {
+          calls.push({ validatedPath, validatedProfile, observed: await readFile(validatedPath) });
+          throw new Error("synthetic host removal parse failure");
+        },
+      }),
+      /host removal parse failure/i,
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].validatedPath, configPath);
+    assert.equal(calls[0].validatedProfile, profileDir);
+    assert.deepEqual(calls[0].observed, Buffer.from(initialConfig));
+    assert.deepEqual(await readFile(configPath), manualBytes);
+  });
+});
+
+test("Codex manual manager restores original bytes when the host process is unavailable", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    await assert.rejects(
+      manager.applyCodexManual({
+        profileDir,
+        token: runtimeSentinel("u"),
+        canonicalOrigin,
+        hostValidator: (input) => manager.validateCodexHostProfile({
+          ...input,
+          hostRunner: async () => {
+            throw new Error("synthetic unavailable host process");
+          },
+        }),
+      }),
+      /Codex host configuration validation failed/i,
+    );
+    assert.deepEqual(await readFile(configPath), Buffer.from(initialConfig));
+  });
+});
+
+test("Codex host validation fails deterministically when its host runner is unavailable", async () => {
+  await withCodexProfile(async ({ profileDir, configPath }) => {
+    assert.equal(typeof manager.validateCodexHostProfile, "function");
+    await assert.rejects(
+      manager.validateCodexHostProfile({
+        profileDir,
+        configPath,
+        hostRunner: async () => {
+          throw new Error("synthetic missing Codex binary");
+        },
+      }),
+      /Codex host configuration validation failed/i,
+    );
+  });
+});
+
+test("Codex host validation receives only the exact selected CODEX_HOME and static command arguments", async () => {
+  await withCodexProfile(async ({ profileDir, configPath }) => {
+    const calls = [];
+    await manager.validateCodexHostProfile({
+      profileDir,
+      configPath,
+      hostRunner: async (input) => {
+        calls.push(input);
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].environment.CODEX_HOME, profileDir);
+    assert.equal(calls[0].configPath, configPath);
+    assert.equal(JSON.stringify(calls[0].args).includes(runtimeSentinel("z")), false);
+  });
+});
+
+test("Codex CLI preserves the unsafe rollback remedy without exposing nested causes", () => {
+  assert.equal(typeof manager.publicCliError, "function");
+  const remedy = "Parley could not safely restore the selected Codex profile after a failed change. Check config.toml before retrying.";
+  assert.equal(manager.publicCliError(new Error(remedy), "Codex"), remedy);
+  assert.equal(
+    manager.publicCliError(new AggregateError([new Error("synthetic internal detail"), new Error(remedy)], "outer failure"), "Codex"),
+    remedy,
+  );
+  assert.equal(
+    manager.publicCliError(new Error("synthetic host parser failure"), "Codex"),
+    "Parley Codex configuration could not be updated. No changes were kept.",
+  );
 });
 
 test("Codex CLI reads a manual token only from stdin and keeps it out of terminal output", async () => {

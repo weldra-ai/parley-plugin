@@ -49,3 +49,11 @@ test("Codex manual wrappers use hidden terminal input, stdin, and an exact OAuth
   assert.match(readme, /quiet session-start/i);
   assert.match(readme, /do not guess.*main/i);
 });
+
+test("Codex and Gemini compatibility declarations are Windows-only until Task 14", async () => {
+  const compatibility = JSON.parse(await readFile(join(repositoryRoot, "compatibility.json"), "utf8"));
+  for (const host of ["codex", "gemini"]) {
+    assert.deepEqual(compatibility.hosts[host].operatingSystems, ["windows"]);
+    assert.match(compatibility.hosts[host].minimumSupport.certification, /Windows/i);
+  }
+});

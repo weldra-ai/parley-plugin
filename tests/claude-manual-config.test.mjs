@@ -297,7 +297,7 @@ test("Claude CLI keeps the unsafe rollback remedy for nested aggregate failures 
   await withProfile(async ({ root }) => {
     const probePath = join(root, "managed-config-cli-error-probe.mjs");
     const source = await readFile(managerPath, "utf8");
-    await writeFile(probePath, `${source}\nexport { publicCliError };\n`);
+    await writeFile(probePath, source);
     const { publicCliError } = await import(pathToFileURL(probePath).href);
     const token = runtimeSentinel("rollback");
     const internalPath = join(root, "profile", "parley", "retained-stage.tmp");
