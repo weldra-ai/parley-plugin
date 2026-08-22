@@ -123,6 +123,11 @@ test("Codex manual manager rejects each unowned Parley form without changing con
     "[mcp_servers]\n\"parley\" = { url = \"https://parley.weldra.dev/mcp\" }\n",
     "mcp_servers = { \"parley\" = { url = \"https://parley.weldra.dev/mcp\" } }\n",
     "mcp_servers = { \"p\\u0061rley\" = { url = \"https://parley.weldra.dev/mcp\" } }\n",
+    "[\"\\U0000006Dcp_servers\".parley]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "[mcp_servers.\"\\U00000070arley\"]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "[mcp_servers.\"\\U00110000\"]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "[mcp_servers.]\nurl = \"https://parley.weldra.dev/mcp\"\n",
+    "[\"mcp_servers\\q\".parley]\nurl = \"https://parley.weldra.dev/mcp\"\n",
   ];
   for (const conflict of conflicts) {
     await context.test(conflict.split("\n", 1)[0], async () => {
@@ -142,6 +147,23 @@ test("Codex manual manager rejects each unowned Parley form without changing con
       });
     });
   }
+});
+
+test("Codex manager preserves clearly unrelated quoted top-level TOML bytes", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    const unrelated = `${initialConfig}[\"unrelated\".extension]\nenabled = true\n`;
+    await writeFile(configPath, unrelated);
+    const original = await readFile(configPath);
+    await manager.applyCodexManual({
+      profileDir,
+      token: runtimeSentinel("q"),
+      canonicalOrigin,
+      hostValidator: acceptedCodexHostValidator,
+    });
+    assert.ok((await readFile(configPath)).subarray(0, original.length).equals(original));
+    await manager.switchCodexOAuth({ profileDir, canonicalOrigin, hostValidator: acceptedCodexHostValidator });
+    assert.deepEqual(await readFile(configPath), original);
+  });
 });
 
 test("Codex manual manager invokes the selected-profile host validator after promotion", async () => {

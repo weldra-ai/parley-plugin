@@ -1015,6 +1015,62 @@ function tomlCodeLine(line) {
   return line;
 }
 
+function decodeTomlBasicKey(content) {
+  let decoded = "";
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (character !== "\\") {
+      if (character.codePointAt(0) < 0x20 || character === "\u007f") {
+        return null;
+      }
+      decoded += character;
+      continue;
+    }
+    index += 1;
+    const escaped = content[index];
+    const simpleEscapes = {
+      b: "\b",
+      t: "\t",
+      n: "\n",
+      f: "\f",
+      r: "\r",
+      '"': '"',
+      "\\": "\\",
+    };
+    if (Object.hasOwn(simpleEscapes, escaped)) {
+      decoded += simpleEscapes[escaped];
+      continue;
+    }
+    const width = escaped === "u" ? 4 : escaped === "U" ? 8 : null;
+    if (width === null) {
+      return null;
+    }
+    const hexadecimal = content.slice(index + 1, index + 1 + width);
+    if (hexadecimal.length !== width || !/^[0-9A-Fa-f]+$/u.test(hexadecimal)) {
+      return null;
+    }
+    const codePoint = Number.parseInt(hexadecimal, 16);
+    if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      return null;
+    }
+    decoded += String.fromCodePoint(codePoint);
+    index += width;
+  }
+  return decoded;
+}
+
+function unparseableTomlKeyPath(segments, quoted, rawQuotedSegment) {
+  const result = [...segments];
+  if (
+    result.length === 0 &&
+    typeof rawQuotedSegment === "string" &&
+    /^['"]mcp_servers(?:\\|['"]|$)/u.test(rawQuotedSegment)
+  ) {
+    result.push("mcp_servers");
+  }
+  return { segments: result, quoted, unparseable: true };
+}
+
 function tomlKeyPath(value) {
   const segments = [];
   let index = 0;
@@ -1046,13 +1102,12 @@ function tomlKeyPath(value) {
         }
       }
       if (value[index - 1] !== quote) {
-        return null;
+        return unparseableTomlKeyPath(segments, true, value.slice(start));
       }
       const raw = value.slice(start, index);
-      try {
-        segment = quote === '"' ? JSON.parse(raw) : raw.slice(1, -1);
-      } catch {
-        return null;
+      segment = quote === '"' ? decodeTomlBasicKey(raw.slice(1, -1)) : raw.slice(1, -1);
+      if (segment === null) {
+        return unparseableTomlKeyPath(segments, true, raw);
       }
       quoted = true;
     } else {
@@ -1061,22 +1116,22 @@ function tomlKeyPath(value) {
         index += 1;
       }
       if (start === index) {
-        return null;
+        return unparseableTomlKeyPath(segments, quoted);
       }
       segment = value.slice(start, index);
     }
     segments.push(segment);
     skipWhitespace();
     if (index === value.length) {
-      return { segments, quoted };
+      return { segments, quoted, unparseable: false };
     }
     if (value[index] !== ".") {
-      return null;
+      return unparseableTomlKeyPath(segments, quoted);
     }
     index += 1;
     skipWhitespace();
   }
-  return null;
+  return unparseableTomlKeyPath(segments, quoted);
 }
 
 function tomlAssignmentKeyPath(line) {
@@ -1114,8 +1169,11 @@ function tomlTableKeyPath(line) {
   const arrayTable = trimmed.startsWith("[[");
   const opener = arrayTable ? "[[" : "[";
   const closer = arrayTable ? "]]" : "]";
-  if (!trimmed.startsWith(opener) || !trimmed.endsWith(closer)) {
+  if (!trimmed.startsWith(opener)) {
     return null;
+  }
+  if (!trimmed.endsWith(closer)) {
+    return tomlKeyPath(trimmed.slice(opener.length));
   }
   return tomlKeyPath(trimmed.slice(opener.length, trimmed.length - closer.length));
 }
@@ -1126,7 +1184,7 @@ function isAmbiguousCodexServerKeyPath(path) {
   }
   // This is deliberately not a general TOML merger. Any quoted root/child segment or a root-level
   // mcp_servers construct is ambiguous ownership and therefore blocks a manual override.
-  if (path.quoted || path.segments.length < 2) {
+  if (path.unparseable || path.quoted || path.segments.length < 2) {
     return true;
   }
   return path.segments[1] === CODEX_MANUAL_SERVER_NAME;
