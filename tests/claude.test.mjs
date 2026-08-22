@@ -134,7 +134,19 @@ async function makeArtifactFixture(mcp = claudeMcp(), helperSource) {
   await writeJson(join(root, "hosts", "gemini", "gemini-extension.json"), {
     name: "parley",
     version: "0.1.0",
-    mcpServers: { parley: { httpUrl: canonicalOrigin } },
+    mcpServers: {
+      parley: {
+        httpUrl: canonicalOrigin,
+        headers: { Authorization: "Bearer ${PARLEY_TOKEN}" },
+        oauth: { enabled: true },
+      },
+    },
+    settings: [{
+      name: "Parley token",
+      description: "Recovery-only manual Parley token.",
+      envVar: "PARLEY_TOKEN",
+      sensitive: true,
+    }],
   });
   await mkdir(join(root, "shared", "skills", "parley"), { recursive: true });
   await writeFile(join(root, "shared", "skills", "parley", "SKILL.md"), "---\nname: parley\ndescription: fixture\n---\n");

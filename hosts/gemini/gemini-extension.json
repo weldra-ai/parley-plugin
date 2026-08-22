@@ -1,10 +1,24 @@
 {
   "name": "parley",
   "version": "0.1.0",
-  "description": "Parley coordination for coding agents.",
+  "description": "OAuth-first Parley coordination for coding agents.",
+  "settings": [
+    {
+      "name": "Parley token",
+      "description": "Recovery-only manual Parley token.",
+      "envVar": "PARLEY_TOKEN",
+      "sensitive": true
+    }
+  ],
   "mcpServers": {
     "parley": {
-      "httpUrl": "https://parley.weldra.dev/mcp"
+      "httpUrl": "https://parley.weldra.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PARLEY_TOKEN}"
+      },
+      "oauth": {
+        "enabled": true
+      }
     }
   }
 }

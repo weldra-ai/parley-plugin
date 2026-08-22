@@ -77,8 +77,18 @@ function geminiManifest() {
     name: "parley",
     version: "0.1.0",
     description: "Parley coordination for coding agents.",
+    settings: [{
+      name: "Parley token",
+      description: "Recovery-only manual Parley token.",
+      envVar: "PARLEY_TOKEN",
+      sensitive: true,
+    }],
     mcpServers: {
-      parley: { httpUrl: canonicalOrigin },
+      parley: {
+        httpUrl: canonicalOrigin,
+        headers: { Authorization: "Bearer ${PARLEY_TOKEN}" },
+        oauth: { enabled: true },
+      },
     },
   };
 }
@@ -169,6 +179,10 @@ test("all native artifacts share one version and byte-identical skill", async ()
     );
     assert.equal(result[0].skillSha256, result[1].skillSha256);
     assert.equal(result[1].skillSha256, result[2].skillSha256);
+    const manager = await readFile(join(repositoryRoot, "shared", "scripts", "managed-config.mjs"));
+    for (const artifact of result) {
+      assert.equal(await readZipText(artifact.archivePath, "scripts/managed-config.mjs"), manager.toString("utf8"));
+    }
   } finally {
     await rm(outputDir, { recursive: true, force: true });
   }

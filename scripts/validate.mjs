@@ -144,7 +144,51 @@ function validateGemini(files, canonicalOrigin, version) {
   if (manifest.name !== "parley" || manifest.version !== version) {
     throw new Error("Gemini native manifest is invalid.");
   }
-  assertOneParleyServer(manifest.mcpServers, canonicalOrigin, "Gemini artifact");
+  const settings = manifest.settings;
+  if (
+    !Array.isArray(settings) ||
+    settings.length !== 1 ||
+    settings[0] === null ||
+    typeof settings[0] !== "object" ||
+    Array.isArray(settings[0]) ||
+    Object.keys(settings[0]).length !== 4 ||
+    settings[0].name !== "Parley token" ||
+    settings[0].description !== "Recovery-only manual Parley token." ||
+    settings[0].envVar !== "PARLEY_TOKEN" ||
+    settings[0].sensitive !== true
+  ) {
+    throw new Error("Gemini artifact must declare exactly one sensitive PARLEY_TOKEN setting.");
+  }
+  const servers = assertObject(manifest.mcpServers, "Gemini artifact mcpServers");
+  if (Object.keys(servers).length !== 1 || !Object.hasOwn(servers, "parley")) {
+    throw new Error("Gemini artifact must expose exactly one logical parley server.");
+  }
+  const server = assertObject(servers.parley, "Gemini artifact parley server");
+  const allowedServerFields = new Set(["httpUrl", "headers", "oauth"]);
+  if (Object.keys(server).some((field) => !allowedServerFields.has(field))) {
+    throw new Error("Gemini artifact must not declare a second authentication source.");
+  }
+  if (server.httpUrl !== canonicalOrigin) {
+    throw new Error("Gemini artifact must use the canonical MCP origin.");
+  }
+  if (
+    server.headers === null ||
+    typeof server.headers !== "object" ||
+    Array.isArray(server.headers) ||
+    Object.keys(server.headers).length !== 1 ||
+    server.headers.Authorization !== "Bearer ${PARLEY_TOKEN}"
+  ) {
+    throw new Error("Gemini artifact may use only its declared sensitive PARLEY_TOKEN placeholder.");
+  }
+  if (
+    server.oauth === null ||
+    typeof server.oauth !== "object" ||
+    Array.isArray(server.oauth) ||
+    Object.keys(server.oauth).length !== 1 ||
+    server.oauth.enabled !== true
+  ) {
+    throw new Error("Gemini artifact must enable OAuth on the same Parley server.");
+  }
 }
 
 const NATIVE_VALIDATORS = {

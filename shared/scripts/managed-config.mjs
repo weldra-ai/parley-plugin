@@ -10,7 +10,11 @@ export const CLAUDE_PROFILE_FILE = ".claude.json";
 export const CLAUDE_MANAGED_DIRECTORY = "parley";
 export const CLAUDE_HELPER_FILE = "claude-space-headers.mjs";
 export const CLAUDE_SIDECAR_FILE = "claude-manual-override.json";
+export const CODEX_PROFILE_FILE = "config.toml";
+export const CODEX_MANUAL_SERVER_NAME = "parley";
 export const MAX_MANUAL_TOKEN_BYTES = 4_096;
+const CODEX_MANAGED_BEGIN = "# BEGIN PARLEY MANAGED MANUAL OVERRIDE";
+const CODEX_MANAGED_END = "# END PARLEY MANAGED MANUAL OVERRIDE";
 const WINDOWS_ACL_TIMEOUT_MS = 3_000;
 const WINDOWS_ACL_MAX_OUTPUT_BYTES = 4_096;
 const WINDOWS_ACL_TERMINATION_GRACE_MS = 250;
@@ -933,6 +937,201 @@ export async function switchClaudeOAuth({
     }, { temporaryRemover, configFileOps });
 }
 
+function decodeUtf8(bytes, label) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label} must be valid UTF-8.`);
+  }
+}
+
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function codexPaths(directory) {
+  return {
+    configPath: join(directory, CODEX_PROFILE_FILE),
+    directory,
+  };
+}
+
+export function codexManagedPaths(configDirectory) {
+  if (typeof configDirectory !== "string" || !isAbsolute(configDirectory)) {
+    throw new Error("Codex profile directory must be absolute.");
+  }
+  return codexPaths(resolve(configDirectory));
+}
+
+export function resolveCodexPaths({ environment = process.env, home = homedir() } = {}) {
+  const candidate = environment.CODEX_HOME;
+  if (candidate === undefined) {
+    return codexPaths(join(resolve(home), ".codex"));
+  }
+  if (typeof candidate !== "string" || !isAbsolute(candidate)) {
+    throw new Error("CODEX_HOME must be an absolute profile path.");
+  }
+  return codexManagedPaths(candidate);
+}
+
+function codexBlockPattern(canonicalOrigin) {
+  const origin = escapeRegularExpression(canonicalOrigin);
+  return new RegExp(
+    `(?:^|\\n)${escapeRegularExpression(CODEX_MANAGED_BEGIN)}\\n# Parley original config: (present|absent)\\n\\[mcp_servers\\.parley\\]\\nurl = "${origin}"\\nhttp_headers = \\{ Authorization = "Bearer (pn_[A-Za-z0-9_-]{20,})" \\}\\n${escapeRegularExpression(CODEX_MANAGED_END)}\\n`,
+    "g",
+  );
+}
+
+function hasUnownedCodexParleyForm(text) {
+  if (/^\s*\[\s*mcp_servers\s*\.\s*(?:parley|["']parley["'])\s*\]\s*$/mu.test(text)) {
+    return true;
+  }
+  if (/^\s*mcp_servers\s*\.\s*(?:parley|["']parley["'])(?:\s*\.\s*[A-Za-z0-9_-]+)*\s*=/mu.test(text)) {
+    return true;
+  }
+  if (/^\s*mcp_servers\s*=\s*\{[\s\S]*?\bparley\s*=/mu.test(text)) {
+    return true;
+  }
+  let inMcpServers = false;
+  for (const line of text.split(/(?<=\n)/u)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      inMcpServers = trimmed === "[mcp_servers]";
+    } else if (inMcpServers && /^parley\s*=/u.test(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function classifyCodexConfig(text, canonicalOrigin) {
+  const begins = text.split(CODEX_MANAGED_BEGIN).length - 1;
+  const ends = text.split(CODEX_MANAGED_END).length - 1;
+  if (begins === 0 && ends === 0) {
+    return hasUnownedCodexParleyForm(text) ? { kind: "unmanaged" } : { kind: "absent" };
+  }
+  if (begins !== 1 || ends !== 1) {
+    return { kind: "unmanaged" };
+  }
+  const matches = [...text.matchAll(codexBlockPattern(canonicalOrigin))];
+  if (matches.length !== 1 || matches[0].index === undefined) {
+    return { kind: "unmanaged" };
+  }
+  const match = matches[0];
+  const outside = `${text.slice(0, match.index)}${text.slice(match.index + match[0].length)}`;
+  if (hasUnownedCodexParleyForm(outside)) {
+    return { kind: "unmanaged" };
+  }
+  return {
+    kind: "managed",
+    index: match.index,
+    bytes: match[0],
+    originalWasAbsent: match[1] === "absent",
+  };
+}
+
+function renderCodexManagedBlock({ canonicalOrigin, token, originalWasAbsent }) {
+  assertToken(token);
+  return [
+    CODEX_MANAGED_BEGIN,
+    `# Parley original config: ${originalWasAbsent ? "absent" : "present"}`,
+    "[mcp_servers.parley]",
+    `url = "${canonicalOrigin}"`,
+    `http_headers = { Authorization = "Bearer ${token}" }`,
+    CODEX_MANAGED_END,
+    "",
+  ].join("\n");
+}
+
+function codexCandidateForManual(text, classification, { canonicalOrigin, token, originalWasAbsent }) {
+  const block = renderCodexManagedBlock({ canonicalOrigin, token, originalWasAbsent });
+  if (classification.kind === "absent") {
+    return `${text}${text.length > 0 ? "\n" : ""}${block}`;
+  }
+  if (classification.kind === "managed") {
+    const prefix = classification.bytes.startsWith("\n") ? "\n" : "";
+    return `${text.slice(0, classification.index)}${prefix}${block}${text.slice(classification.index + classification.bytes.length)}`;
+  }
+  throw new Error("The selected Codex profile contains an unowned Parley MCP configuration. Review or remove that entry, then retry.");
+}
+
+async function writeCodexConfig(path, bytes) {
+  await atomicWrite(path, bytes, { sensitive: true });
+}
+
+async function restoreCodexConfig(path, original) {
+  if (original.exists) {
+    await writeCodexConfig(path, original.bytes);
+  } else {
+    await rm(path, { force: true });
+  }
+}
+
+async function commitCodexConfig(paths, original, candidate, canonicalOrigin) {
+  const candidateBytes = Buffer.from(candidate, "utf8");
+  if (original.exists && original.bytes.equals(candidateBytes)) {
+    return;
+  }
+  try {
+    await writeCodexConfig(paths.configPath, candidateBytes);
+    const verified = decodeUtf8(await readRegularFile(paths.configPath, "Codex profile"), "Codex profile");
+    if (classifyCodexConfig(verified, canonicalOrigin).kind === "unmanaged") {
+      throw new Error("Codex managed configuration validation failed.");
+    }
+  } catch (error) {
+    try {
+      await restoreCodexConfig(paths.configPath, original);
+    } catch {
+      throw new Error("Parley could not safely restore the selected Codex profile after a failed change. Check config.toml before retrying.");
+    }
+    throw error;
+  }
+}
+
+export async function applyCodexManual({ profileDir, token, canonicalOrigin } = {}) {
+  assertToken(token);
+  if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
+    throw new Error("Codex manual override requires the canonical HTTPS MCP origin.");
+  }
+  const paths = profileDir === undefined ? resolveCodexPaths() : codexManagedPaths(profileDir);
+  const original = await snapshot(paths.configPath);
+  const text = original.exists ? decodeUtf8(original.bytes, "Codex profile") : "";
+  const classification = classifyCodexConfig(text, canonicalOrigin);
+  const candidate = codexCandidateForManual(text, classification, {
+    canonicalOrigin,
+    token,
+    originalWasAbsent: classification.kind === "managed" ? classification.originalWasAbsent : !original.exists,
+  });
+  await commitCodexConfig(paths, original, candidate, canonicalOrigin);
+  return paths;
+}
+
+export async function switchCodexOAuth({ profileDir, canonicalOrigin } = {}) {
+  if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
+    throw new Error("Codex OAuth switch requires the canonical HTTPS MCP origin.");
+  }
+  const paths = profileDir === undefined ? resolveCodexPaths() : codexManagedPaths(profileDir);
+  const original = await snapshot(paths.configPath);
+  if (!original.exists) {
+    return paths;
+  }
+  const text = decodeUtf8(original.bytes, "Codex profile");
+  const classification = classifyCodexConfig(text, canonicalOrigin);
+  if (classification.kind === "absent") {
+    return paths;
+  }
+  if (classification.kind !== "managed") {
+    throw new Error("The selected Codex profile contains an unowned Parley MCP configuration. Review or remove that entry, then retry.");
+  }
+  const candidate = `${text.slice(0, classification.index)}${text.slice(classification.index + classification.bytes.length)}`;
+  if (classification.originalWasAbsent && candidate.length === 0) {
+    await rm(paths.configPath, { force: true });
+    return paths;
+  }
+  await commitCodexConfig(paths, original, candidate, canonicalOrigin);
+  return paths;
+}
+
 async function readManualToken() {
   const chunks = [];
   let length = 0;
@@ -970,28 +1169,39 @@ function helperSourceFromArgs(args) {
 
 async function main() {
   const [host, mode, ...args] = process.argv.slice(2);
-  if (host !== "claude" || !["manual", "oauth"].includes(mode)) {
-    throw new Error("Usage: managed-config.mjs claude <manual|oauth> [--helper-source PATH]");
+  if (!["claude", "codex"].includes(host) || !["manual", "oauth"].includes(mode)) {
+    throw new Error("Usage: managed-config.mjs <claude|codex> <manual|oauth> [--helper-source PATH]");
   }
   const canonicalOrigin = "https://parley.weldra.dev/mcp";
   if (mode === "manual") {
     let token = await readManualToken();
     try {
-      await applyClaudeManual({ canonicalOrigin, token, helperSourcePath: helperSourceFromArgs(args) });
+      if (host === "claude") {
+        await applyClaudeManual({ canonicalOrigin, token, helperSourcePath: helperSourceFromArgs(args) });
+      } else {
+        if (args.length !== 0) {
+          throw new Error("Codex manual setup does not accept arguments.");
+        }
+        await applyCodexManual({ canonicalOrigin, token });
+      }
     } finally {
       token = "";
     }
-    process.stdout.write("Claude manual connection configured.\n");
+    process.stdout.write(`${host === "claude" ? "Claude" : "Codex"} manual connection configured.\n`);
   } else {
     if (args.length !== 0) {
       throw new Error("OAuth switch does not accept arguments.");
     }
-    await switchClaudeOAuth({ canonicalOrigin });
-    process.stdout.write("Claude OAuth connection restored.\n");
+    if (host === "claude") {
+      await switchClaudeOAuth({ canonicalOrigin });
+    } else {
+      await switchCodexOAuth({ canonicalOrigin });
+    }
+    process.stdout.write(`${host === "claude" ? "Claude" : "Codex"} OAuth connection restored.\n`);
   }
 }
 
-function publicCliError(error) {
+function publicCliError(error, host = "Claude") {
   const message = error instanceof Error ? error.message : "";
   if (
     message === UNSAFE_CLAUDE_ROLLBACK_MESSAGE ||
@@ -1007,12 +1217,13 @@ function publicCliError(error) {
   ) {
     return message;
   }
-  return "Parley Claude configuration could not be updated. No changes were kept.";
+  return `Parley ${host} configuration could not be updated. No changes were kept.`;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    process.stderr.write(`${publicCliError(error)}\n`);
+    const host = process.argv[2] === "codex" ? "Codex" : "Claude";
+    process.stderr.write(`${publicCliError(error, host)}\n`);
     process.exitCode = 1;
   });
 }
