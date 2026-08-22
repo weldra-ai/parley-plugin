@@ -19,9 +19,10 @@ pnpm scan-secrets
 node scripts/certify-hosts.mjs --backend-sha <40-lowercase-hex> --plugin-tag v<package-version> --output <local-output-path>
 ```
 
-The last command snapshots the default local `dist/` ZIPs, checksums, and materialized trees. Validation,
-the secret scan, native validators, and the inventory hashes all use those same private snapshot bytes; a
-digest check rejects changes between every gate and final inventory. It refuses custom artifact directories.
+The last command rejects a symlinked or realpath-divergent default local `dist/` root, then snapshots its ZIPs,
+checksums, and materialized trees. Validation, the secret scan, native validators, and the inventory hashes all use
+those same private snapshot bytes; stable source reads and digest checks reject source or snapshot changes between
+every gate and final inventory. It refuses custom artifact directories.
 It does not sign an artifact, tag a version, contact a host, mutate a host profile/keychain, create a live
 OAuth request, deploy, publish, or prove a release. Keep that local output outside source control.
 
@@ -29,8 +30,10 @@ OAuth request, deploy, publish, or prove a release. Keep that local output outsi
 
 The backend release verifier accepts a signed report only when it matches the exact backend SHA and
 plugin tag/version and is verified against an operator-supplied Ed25519 public key and a separate trusted
-copy of the exact candidate `compatibility.json` declaration. That declaration sets every host-version/OS/auth
-matrix cell that the report must cover. The report must bind artifact SHA-256 values; raw client-id hashes and
+copy of the exact candidate `compatibility.json` declaration. Every declared host version in that input must cover
+Windows, macOS, Linux, OAuth, and manual authentication, which sets every host-version/OS/auth matrix cell that the
+report must cover. The current Windows-only Codex and Gemini input is provisional and is rejected by that release
+gate. The report must bind artifact SHA-256 values; raw client-id hashes and
 classification methods; CIMD safety controls matched exactly to the CIMD method; all six directional pairs
 whose endpoints each bind the declared host/version/OS/auth tuple, exact artifact SHA-256, and exact plugin
 tag/version; local gate, privacy, and beta-usability evidence; exact stage/prod SHAs; signature identity; and

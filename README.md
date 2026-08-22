@@ -25,9 +25,10 @@ node scripts/certify-hosts.mjs --backend-sha <40-lowercase-hex> --plugin-tag v<p
 
 The build produces three versioned ZIP artifacts, their SHA-256 checksum files, and materialized native roots in `dist/`. The package version is the one source of artifact version truth.
 
-`certify-hosts.mjs` snapshots the default local `dist/` archives and materialized trees, then validates,
-secret-scans, native-validates, and hashes those same private snapshot bytes before writing an **unsigned
-local artifact inventory**. It refuses custom artifact directories. It does not authenticate a host, create a
+`certify-hosts.mjs` rejects a symlinked or realpath-divergent `dist/` root, snapshots the default local archives
+and materialized trees, and detects source or snapshot changes while it validates, secret-scans, native-validates,
+and hashes those same private snapshot bytes before writing an **unsigned local artifact inventory**. It refuses
+custom artifact directories. It does not authenticate a host, create a
 real signed report, or satisfy the required stage, production, cross-agent, beta, signing, publication, or
 rollback gates.
 
@@ -43,6 +44,7 @@ The workflow imports that public key into an isolated temporary GnuPG home, reje
 ## Compatibility status
 
 `compatibility.json` records provisional tested-version, operating-system, and authentication declaration
-inputs plus enforcement posture. It is not host-version certification or release evidence. Before external
-release certification, an operator-trusted copy of the exact candidate declaration sets every matrix cell the
-signed backend report must cover.
+inputs plus enforcement posture. It is not host-version certification or release evidence. The current Windows-only
+Codex and Gemini declarations cannot authorize the release verifier: an operator-trusted candidate must declare
+Windows, macOS, Linux, OAuth, and manual authentication for every supported host version before the signed backend
+report can cover every required matrix cell.

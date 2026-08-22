@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,6 +123,123 @@ test("artifact snapshot rejects a post-validation replacement", async () => {
     } finally {
       await snapshot.cleanup();
     }
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("artifact snapshot rejects a symlinked or realpath-divergent dist root", async (context) => {
+  const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
+  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-root-link-"));
+  const artifactDir = join(outputRoot, "artifacts");
+  const linkedArtifactDir = join(outputRoot, "linked-artifacts");
+  try {
+    await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: artifactDir });
+    try {
+      await symlink(artifactDir, linkedArtifactDir, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (["EACCES", "EPERM", "UNKNOWN"].includes(error?.code)) {
+        context.skip("the platform does not permit a test artifact directory link");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      snapshotArtifactDirectory({ artifactDir: linkedArtifactDir, version: "0.1.0" }),
+      /symbolic link|realpath/i,
+    );
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("artifact snapshot detects a deterministic source replacement during copy", async () => {
+  const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
+  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-source-replacement-"));
+  const artifactDir = join(outputRoot, "artifacts");
+  const archive = join(artifactDir, "parley-codex-0.1.0.zip");
+  let replaced = false;
+  try {
+    await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: artifactDir });
+    await assert.rejects(
+      snapshotArtifactDirectory({
+        artifactDir,
+        version: "0.1.0",
+        beforeRead: async (source) => {
+          if (source === archive && !replaced) {
+            replaced = true;
+            await rename(source, `${source}.original`);
+            await writeFile(source, "replacement artifact bytes");
+          }
+        },
+      }),
+      /source artifact tree changed|source file changed/i,
+    );
+    assert.equal(replaced, true);
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("artifact snapshot detects a source-tree replacement after artifact copy", async () => {
+  const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
+  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-post-copy-replacement-"));
+  const artifactDir = join(outputRoot, "artifacts");
+  const archive = join(artifactDir, "parley-claude-0.1.0.zip");
+  let replaced = false;
+  try {
+    await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: artifactDir });
+    await assert.rejects(
+      snapshotArtifactDirectory({
+        artifactDir,
+        version: "0.1.0",
+        afterCopy: async () => {
+          replaced = true;
+          await rename(archive, `${archive}.original`);
+          await writeFile(archive, "replacement after copy");
+        },
+      }),
+      /source artifact tree changed/i,
+    );
+    assert.equal(replaced, true);
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("artifact snapshot rejects a source-child symlink swap during copy when permitted", async (context) => {
+  const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
+  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-child-link-"));
+  const artifactDir = join(outputRoot, "artifacts");
+  const archive = join(artifactDir, "parley-gemini-0.1.0.zip");
+  const replacement = join(artifactDir, "replacement.zip");
+  let swapped = false;
+  try {
+    await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: artifactDir });
+    await writeFile(replacement, "replacement artifact bytes");
+    try {
+      await assert.rejects(
+        snapshotArtifactDirectory({
+          artifactDir,
+          version: "0.1.0",
+          beforeRead: async (source) => {
+            if (source === archive && !swapped) {
+              swapped = true;
+              await rm(source);
+              await symlink(replacement, source, "file");
+            }
+          },
+        }),
+        /source artifact tree changed|symbolic link|source file changed/i,
+      );
+    } catch (error) {
+      if (["EACCES", "EPERM", "UNKNOWN"].includes(error?.code)) {
+        context.skip("the platform does not permit a test file link");
+        return;
+      }
+      throw error;
+    }
+    assert.equal(swapped, true);
   } finally {
     await rm(outputRoot, { recursive: true, force: true });
   }
