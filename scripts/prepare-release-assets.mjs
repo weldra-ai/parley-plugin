@@ -66,11 +66,10 @@ export async function prepareReleaseAssets({ artifacts, outputDir } = {}) {
       releaseNames.push(archiveName, `${archiveName}.sha256`);
     }
 
-    const { archive: geminiArchive, digest: geminiDigest } = verifiedArchives.get("gemini");
+    const { archive: geminiArchive } = verifiedArchives.get("gemini");
     for (const alias of GEMINI_ALIASES) {
       await stageAsset(stage, alias, geminiArchive);
-      await stageAsset(stage, `${alias}.sha256`, Buffer.from(`${geminiDigest}  ${alias}\n`));
-      releaseNames.push(alias, `${alias}.sha256`);
+      releaseNames.push(alias);
       geminiAliases.push(join(destination, alias));
     }
 

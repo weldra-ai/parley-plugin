@@ -21,7 +21,15 @@ test("Gemini release aliases are platform-selectable copies of the certified art
       ["darwin.parley.zip", "linux.parley.zip", "win32.parley.zip"],
     );
     for (const path of result.geminiAliases) assert.deepEqual(await readFile(path), geminiBytes);
-    assert.equal(result.releaseFiles.length, 12);
+    const releaseNames = result.releaseFiles.map((path) => basename(path));
+    for (const platform of ["darwin", "linux", "win32"]) {
+      assert.deepEqual(
+        releaseNames.filter((name) => name.toLowerCase().startsWith(`${platform}.`)),
+        [`${platform}.parley.zip`],
+        `Gemini 0.56.0 selects the first asset with the ${platform}. prefix`,
+      );
+    }
+    assert.equal(result.releaseFiles.length, 9);
   } finally {
     await rm(buildDir, { recursive: true, force: true });
     await rm(releaseDir, { recursive: true, force: true });
