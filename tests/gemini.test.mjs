@@ -147,6 +147,13 @@ test("Gemini 0.56.0 declares one OAuth-enabled server and its one sensitive manu
   });
 });
 
+test("Gemini install guidance skips the recovery token prompt and explains the host warning", async () => {
+  const readme = await readFile(join(geminiRoot, "README.md"), "utf8");
+  assert.match(readme, /--skip-settings/);
+  assert.match(readme, /missing settings.*expected/is);
+  assert.match(readme, /OAuth/i);
+});
+
 test("pinned Gemini expands the sensitive setting into the live loopback Authorization header only", async () => {
   const token = runtimeSentinel();
   await withCaptureServer(async ({ baseUrl, requests }) => {

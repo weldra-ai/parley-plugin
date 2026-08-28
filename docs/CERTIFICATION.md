@@ -12,6 +12,7 @@ From this repository, run:
 
 ```text
 pnpm install --frozen-lockfile
+pnpm sync-marketplaces
 pnpm test
 pnpm build
 pnpm validate
@@ -45,6 +46,8 @@ content, raw client ids, remotes, and paths are prohibited and make the evidence
 
 These remain pending until independently completed and recorded:
 
+- creation of the public `weldra-ai/parley-plugin` repository, the `gemini-cli-extension` repository topic,
+  and read-only verification of the committed Codex and Claude catalogs from the exact candidate commit;
 - immutable candidate tag plus built/signed checksums first, with the exact compatibility declaration bound
   before clean-profile or pair evidence; this does not publish a package or listing;
 - stage deployment and schema/legacy installer checks for the exact backend SHA, followed by candidate

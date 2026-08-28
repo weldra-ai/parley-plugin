@@ -65,8 +65,9 @@ jobs:
       - run: pnpm build
       - run: pnpm validate
       - run: pnpm scan-secrets
+      - run: pnpm prepare-release
       - name: Upload one coherent artifact set
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/*.zip.sha256 --verify-tag
+        run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag

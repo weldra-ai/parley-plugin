@@ -7,3 +7,4 @@
   or make the packages available.
 - Hardened local inventory evidence around one private artifact snapshot, stable source-tree identity checks, and
   compatibility-bound release gates.
+- Added deterministic Codex and Claude marketplace snapshots plus platform-selectable Gemini release aliases.

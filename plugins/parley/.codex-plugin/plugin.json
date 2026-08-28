@@ -1,0 +1,24 @@
+{
+  "name": "parley",
+  "version": "0.1.0",
+  "description": "OAuth-first Parley coordination for coding agents.",
+  "author": {
+    "name": "Weldra"
+  },
+  "skills": "./skills/",
+  "mcpServers": {
+    "parley": {
+      "type": "http",
+      "url": "https://parley.weldra.dev/mcp"
+    }
+  },
+  "interface": {
+    "displayName": "Parley",
+    "shortDescription": "Coordinate coding agents.",
+    "longDescription": "Use Parley to coordinate coding agents.",
+    "developerName": "Weldra",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Connect this agent to Parley."
+  }
+}

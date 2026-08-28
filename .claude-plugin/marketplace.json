@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "weldra",
+  "version": "0.1.0",
+  "description": "Weldra plugins for agent coordination.",
+  "owner": {
+    "name": "Weldra"
+  },
+  "plugins": [
+    {
+      "name": "parley",
+      "description": "OAuth-first Parley coordination for coding agents.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Weldra"
+      },
+      "source": "./plugins/claude/parley",
+      "category": "productivity"
+    }
+  ]
+}

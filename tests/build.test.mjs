@@ -568,6 +568,7 @@ test("CI installs pinned native validators before pnpm validate", async () => {
   assert.match(ci, /python -m pip install --disable-pip-version-check -r tools\/codex-plugin-validator\/requirements\.txt/);
   assert.match(ci, /pnpm validate/);
   assert.match(validatorGate, /await runNativeValidators\(\{ outputDir: join\(projectRoot\(\), "dist"\) \}\)/);
+  assert.match(validatorGate, /await syncMarketplaceSnapshots\(\{ root: projectRoot\(\), check: true \}\)/);
   assert.match(pnpmWorkspace, /'@anthropic-ai\/claude-code': true/);
   assert.match(pnpmWorkspace, /'@github\/keytar': false/);
   assert.match(pnpmWorkspace, /node-pty: false/);
@@ -606,6 +607,13 @@ test("release rejects private-key material in the configured public signer varia
   assert.ok(release.indexOf('--list-secret-keys') < release.indexOf('actual_fingerprints'));
   assert.ok(release.indexOf('--list-secret-keys') < release.indexOf('git verify-tag "${tag}"'));
   assert.match(readme, /must not contain private-key material/i);
+});
+
+test("release publishes certified archives plus platform-selectable Gemini aliases", async () => {
+  const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+  assert.match(release, /pnpm prepare-release/);
+  assert.match(release, /gh release create "\$\{GITHUB_REF_NAME\}" release\/\*/);
+  assert.doesNotMatch(release, /gh release create[^\n]+dist\/\*/);
 });
 
 test("CI and release pin every required GitHub Action to the resolved immutable commit", async () => {

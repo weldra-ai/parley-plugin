@@ -3,6 +3,10 @@
 Install Parley as a Gemini CLI extension. The one bundled `parley` server is OAuth-enabled and has one
 sensitive recovery setting named `PARLEY_TOKEN`.
 
+Use `--skip-settings` on the initial install so Gemini does not ask for the recovery token before trying
+OAuth. Gemini CLI 0.56.0 still prints `missing settings: Parley token`; that warning is expected and does
+not disable the extension or block OAuth. Configure the setting only when the OAuth flow is unavailable.
+
 With no sensitive setting stored, Gemini CLI 0.56.0 first sends `Authorization: Bearer`, receives the
 normal 401 challenge, and continues OAuth discovery. A valid stored OAuth credential overrides the recovery-only manual header. This is not a persistent auth-mode switch: Gemini 0.56.0 exposes no
 credential-clear or no logout command, so the release does not promise a switch away from

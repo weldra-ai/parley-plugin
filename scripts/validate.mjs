@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HOSTS, readZipFiles } from "./build.mjs";
 import { runNativeValidators } from "./native-validate.mjs";
+import { syncMarketplaceSnapshots } from "./sync-marketplaces.mjs";
 
 const REQUIRED_MANIFESTS = {
   codex: ".codex-plugin/plugin.json",
@@ -358,6 +359,7 @@ export async function validateArtifacts({
 async function main() {
   const result = await validateArtifacts();
   await runNativeValidators({ outputDir: join(projectRoot(), "dist") });
+  await syncMarketplaceSnapshots({ root: projectRoot(), check: true });
   console.log(`Validated ${HOSTS.length} native artifacts for ${result.version}.`);
 }
 
