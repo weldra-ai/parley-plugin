@@ -84,11 +84,16 @@ test("committed marketplace packages are byte-identical to deterministic native 
 });
 
 test("README gives one exact native install path per host without claiming availability", async () => {
+  const packageJson = await readJson(join(repositoryRoot, "package.json"));
   const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");
   assert.match(readme, /codex plugin marketplace add weldra-ai\/parley-plugin/);
   assert.match(readme, /codex plugin add parley@weldra/);
   assert.match(readme, /claude plugin marketplace add weldra-ai\/parley-plugin/);
   assert.match(readme, /claude plugin install parley@weldra/);
   assert.match(readme, /gemini extensions install https:\/\/github\.com\/weldra-ai\/parley-plugin[^\n]+--skip-settings/);
+  assert.deepEqual(
+    [...readme.matchAll(/(?:--ref |parley-plugin@)(v\d+\.\d+\.\d+)/g)].map((match) => match[1]),
+    Array(3).fill(`v${packageJson.version}`),
+  );
   assert.match(readme, /not yet available/i);
 });
