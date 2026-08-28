@@ -45,22 +45,28 @@ export async function prepareReleaseAssets({ artifacts, outputDir } = {}) {
   const stage = await mkdtemp(join(dirname(destination), ".parley-release-"));
   const releaseNames = [];
   const geminiAliases = [];
+  const verifiedArchives = new Map();
   try {
     for (const host of HOSTS) {
       const artifact = byHost.get(host);
       const archive = await readFile(artifact.archivePath);
       const archiveName = basename(artifact.archivePath);
       const digest = hash(archive);
+      const expectedChecksum = `${digest}  ${archiveName}\n`;
+      const checksum = await readFile(`${artifact.archivePath}.sha256`, "utf8");
+      if (checksum !== expectedChecksum) {
+        throw new Error(`Release artifact checksum does not match for ${host}.`);
+      }
       if (artifact.sha256 !== undefined && artifact.sha256 !== digest) {
         throw new Error(`Release artifact digest changed for ${host}.`);
       }
+      verifiedArchives.set(host, { archive, digest });
       await stageAsset(stage, archiveName, archive);
-      await stageAsset(stage, `${archiveName}.sha256`, Buffer.from(`${digest}  ${archiveName}\n`));
+      await stageAsset(stage, `${archiveName}.sha256`, Buffer.from(expectedChecksum));
       releaseNames.push(archiveName, `${archiveName}.sha256`);
     }
 
-    const geminiArchive = await readFile(byHost.get("gemini").archivePath);
-    const geminiDigest = hash(geminiArchive);
+    const { archive: geminiArchive, digest: geminiDigest } = verifiedArchives.get("gemini");
     for (const alias of GEMINI_ALIASES) {
       await stageAsset(stage, alias, geminiArchive);
       await stageAsset(stage, `${alias}.sha256`, Buffer.from(`${geminiDigest}  ${alias}\n`));
@@ -98,4 +104,3 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exitCode = 1;
   });
 }
-
