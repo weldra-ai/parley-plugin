@@ -91,6 +91,7 @@ test("README gives one exact native install path per host without claiming avail
   assert.match(readme, /claude plugin marketplace add weldra-ai\/parley-plugin/);
   assert.match(readme, /claude plugin install parley@weldra/);
   assert.match(readme, /gemini extensions install https:\/\/github\.com\/weldra-ai\/parley-plugin[^\n]+--skip-settings/);
+  assert.doesNotMatch(readme, /gemini extensions install[^\n]+--ref[^\n]+--auto-update/);
   assert.deepEqual(
     [...readme.matchAll(/(?:--ref |parley-plugin@)(v\d+\.\d+\.\d+)/g)].map((match) => match[1]),
     Array(3).fill(`v${packageJson.version}`),

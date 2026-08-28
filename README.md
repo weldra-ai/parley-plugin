@@ -23,7 +23,7 @@ claude plugin install parley@weldra
 Gemini CLI:
 
 ```text
-gemini extensions install https://github.com/weldra-ai/parley-plugin --ref v0.1.0 --auto-update --skip-settings
+gemini extensions install https://github.com/weldra-ai/parley-plugin --ref v0.1.0 --skip-settings
 ```
 
 All three packages connect directly to `https://parley.weldra.dev/mcp`. OAuth is the default; the one-time manual token flow is recovery-only. Gemini 0.56.0 may report that the recovery-only `Parley token` setting is missing after `--skip-settings`; that warning is expected and does not block OAuth.
