@@ -1,16 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  applyClaudeManual,
+  applyClaudeManual as applyClaudeManualProduction,
   claudeManagedPaths,
   CLAUDE_MANUAL_SERVER_NAME,
   resolveClaudePaths,
-  switchClaudeOAuth,
+  switchClaudeOAuth as switchClaudeOAuthProduction,
 } from "../shared/scripts/managed-config.mjs";
 
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
@@ -38,6 +38,35 @@ function verifiedWindowsAcl(sid = windowsTestSid, accessRules) {
   };
 }
 
+function hermeticConfigFileOps(overrides) {
+  const windowsDefaults = (overrides?.platform ?? process.platform) === "win32"
+    ? {
+        windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "C:\\Windows" },
+        windowsSystemPathResolver: async () => ({ executable: process.execPath, prefixArgs: [] }),
+        processRunner: async () => verifiedWindowsAcl(),
+      }
+    : {};
+  return { ...windowsDefaults, ...(overrides ?? {}) };
+}
+
+function applyClaudeManual(options) {
+  return applyClaudeManualProduction({
+    ...options,
+    configFileOps: hermeticConfigFileOps(options?.configFileOps),
+  });
+}
+
+function switchClaudeOAuth(options) {
+  return switchClaudeOAuthProduction({
+    ...options,
+    configFileOps: hermeticConfigFileOps(options?.configFileOps),
+  });
+}
+
+async function canonicalTemporaryDirectory(prefix) {
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
+}
+
 function runtimeSentinel(letter = "a") {
   return ["p", "n"].join("") + "_" + letter.repeat(24);
 }
@@ -56,7 +85,7 @@ async function temporaryFiles(directory) {
 }
 
 async function withProfile(run) {
-  const root = await mkdtemp(join(tmpdir(), "parley-claude-managed-config-"));
+  const root = await canonicalTemporaryDirectory("parley-claude-managed-config-");
   const profileDir = join(root, "profile");
   const helperSourcePath = join(root, "space-headers.mjs");
   const configPath = join(profileDir, ".claude.json");
@@ -260,7 +289,11 @@ test("Claude manager serializes concurrent profile changes without leaving a loc
   });
 });
 
-test("Claude manager reports a conflict and active lock with token-safe next actions", async () => {
+test("Claude manager reports a conflict and active lock with token-safe next actions", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("direct CLI mutation uses the real Windows ACL boundary; deterministic ACL behavior is covered separately");
+    return;
+  }
   await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
     const token = runtimeSentinel();
     const conflict = JSON.parse(await readFile(configPath, "utf8"));
@@ -737,7 +770,7 @@ test("Claude config reaps a real timed-out Windows ACL child before staging clea
     let attemptedWrite = false;
     let cleanupObservedRelease = false;
     await assert.rejects(
-      applyClaudeManual({
+      applyClaudeManualProduction({
         profileDir,
         token: runtimeSentinel("n"),
         helperSourcePath,
@@ -747,6 +780,7 @@ test("Claude config reaps a real timed-out Windows ACL child before staging clea
           windowsAclTimeoutMs: 500,
           windowsAclTerminationGraceMs: 50,
           windowsAclReapTimeoutMs: 1_000,
+          windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "C:\\Windows" },
           windowsSystemPathResolver: async () => ({
             executable: process.execPath,
             prefixArgs: [hangingAclChildPath, releaseMarker],
@@ -864,8 +898,12 @@ test("Claude OAuth switch refuses tampered ownership sidecar without modifying a
   });
 });
 
-test("Claude direct manager invocation works from a path containing spaces and keeps the token out of output", async () => {
-  const root = await mkdtemp(join(tmpdir(), "parley managed CLI "));
+test("Claude direct manager invocation works from a path containing spaces and keeps the token out of output", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("direct CLI mutation uses the real Windows ACL boundary; deterministic ACL behavior is covered separately");
+    return;
+  }
+  const root = await canonicalTemporaryDirectory("parley managed CLI ");
   const profileDir = join(root, "profile");
   const managerCopy = join(root, "manager with spaces", "managed config.mjs");
   const helperSourcePath = join(root, "space-headers.mjs");

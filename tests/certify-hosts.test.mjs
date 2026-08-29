@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, cp, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,10 @@ import { validateArtifacts } from "../scripts/validate.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const tokenSuffix = "K7nQg4sL2pV8xR5dZ1hM9cT6wB3yF0a";
+
+async function canonicalTemporaryDirectory(prefix) {
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -25,7 +29,7 @@ function run(command, args, options = {}) {
 }
 
 async function sourceFixture() {
-  const root = await mkdtemp(join(tmpdir(), "parley-certify-source-"));
+  const root = await canonicalTemporaryDirectory("parley-certify-source-");
   await Promise.all([
     cp(join(repositoryRoot, "package.json"), join(root, "package.json")),
     cp(join(repositoryRoot, "compatibility.json"), join(root, "compatibility.json")),
@@ -36,7 +40,7 @@ async function sourceFixture() {
 }
 
 test("local host inventory binds only build artifacts and is explicitly unsigned", async () => {
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-local-host-evidence-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-local-host-evidence-");
   const output = join(outputRoot, "inventory.json");
   try {
     await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: join(repositoryRoot, "dist") });
@@ -67,7 +71,7 @@ test("local host inventory binds only build artifacts and is explicitly unsigned
 });
 
 test("collector refuses an external secret-bearing artifact directory without producing an inventory", async () => {
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-external-artifact-injection-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-external-artifact-injection-");
   const output = join(outputRoot, "inventory.json");
   const externalArtifacts = join(outputRoot, "external-artifacts");
   try {
@@ -111,7 +115,7 @@ test("collector secret scan covers built artifact bytes after source cleanup", a
 test("artifact snapshot rejects a post-validation replacement", async () => {
   const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
   assert.equal(typeof snapshotArtifactDirectory, "function");
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-replacement-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-snapshot-replacement-");
   const artifactDir = join(outputRoot, "artifacts");
   try {
     await buildArtifacts({ version: "0.1.0", sourceDir: repositoryRoot, outputDir: artifactDir });
@@ -130,7 +134,7 @@ test("artifact snapshot rejects a post-validation replacement", async () => {
 
 test("artifact snapshot rejects a symlinked or realpath-divergent dist root", async (context) => {
   const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-root-link-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-snapshot-root-link-");
   const artifactDir = join(outputRoot, "artifacts");
   const linkedArtifactDir = join(outputRoot, "linked-artifacts");
   try {
@@ -155,7 +159,7 @@ test("artifact snapshot rejects a symlinked or realpath-divergent dist root", as
 
 test("artifact snapshot detects a deterministic source replacement during copy", async () => {
   const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-source-replacement-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-snapshot-source-replacement-");
   const artifactDir = join(outputRoot, "artifacts");
   const archive = join(artifactDir, "parley-codex-0.1.0.zip");
   let replaced = false;
@@ -183,7 +187,7 @@ test("artifact snapshot detects a deterministic source replacement during copy",
 
 test("artifact snapshot detects a source-tree replacement after artifact copy", async () => {
   const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-post-copy-replacement-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-snapshot-post-copy-replacement-");
   const artifactDir = join(outputRoot, "artifacts");
   const archive = join(artifactDir, "parley-claude-0.1.0.zip");
   let replaced = false;
@@ -209,7 +213,7 @@ test("artifact snapshot detects a source-tree replacement after artifact copy", 
 
 test("artifact snapshot rejects a source-child symlink swap during copy when permitted", async (context) => {
   const { snapshotArtifactDirectory } = await import("../scripts/certify-hosts.mjs");
-  const outputRoot = await mkdtemp(join(tmpdir(), "parley-snapshot-child-link-"));
+  const outputRoot = await canonicalTemporaryDirectory("parley-snapshot-child-link-");
   const artifactDir = join(outputRoot, "artifacts");
   const archive = join(artifactDir, "parley-gemini-0.1.0.zip");
   const replacement = join(artifactDir, "replacement.zip");

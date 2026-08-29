@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +9,21 @@ import * as manager from "../shared/scripts/managed-config.mjs";
 
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
+
+async function canonicalTemporaryDirectory(prefix) {
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
+}
+
+async function acceptedCodexExecutable(root) {
+  const directory = join(root, "bin");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, process.platform === "win32" ? "codex.cmd" : "codex");
+  await writeFile(path, process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
+  if (process.platform !== "win32") {
+    await chmod(path, 0o755);
+  }
+  return directory;
+}
 
 function runtimeSentinel(letter = "m") {
   return ["p", "n"].join("") + "_" + letter.repeat(24);
@@ -53,7 +68,7 @@ function runManager(args, { environment, input }) {
 }
 
 async function withCodexProfile(run) {
-  const root = await mkdtemp(join(tmpdir(), "parley-codex-managed-config-"));
+  const root = await canonicalTemporaryDirectory("parley-codex-managed-config-");
   const profileDir = join(root, "profile");
   const configPath = join(profileDir, "config.toml");
   const initialConfig = [
@@ -322,12 +337,17 @@ test("Codex CLI preserves the unsafe rollback remedy without exposing nested cau
 });
 
 test("Codex CLI reads a manual token only from stdin and keeps it out of terminal output", async () => {
-  const root = await mkdtemp(join(tmpdir(), "parley-codex-managed-cli-"));
+  const root = await canonicalTemporaryDirectory("parley-codex-managed-cli-");
   const profileDir = join(root, "profile");
   const token = runtimeSentinel("c");
   try {
+    const executableDirectory = await acceptedCodexExecutable(root);
     const result = await runManager([managerPath, "codex", "manual"], {
-      environment: { ...process.env, CODEX_HOME: profileDir },
+      environment: {
+        ...process.env,
+        CODEX_HOME: profileDir,
+        PATH: `${executableDirectory}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+      },
       input: `${token}\n`,
     });
     assert.equal(result.code, 0, result.stderr.toString("utf8"));
