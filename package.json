@@ -2,7 +2,7 @@
   "name": "@weldra-ai/parley-plugin-build",
   "private": true,
   "version": "0.1.0",
-  "releaseCandidate": 2,
+  "releaseCandidate": 3,
   "type": "module",
   "engines": {
     "node": ">=20"

@@ -5,35 +5,35 @@
   "hosts": {
     "codex": {
       "testedVersions": ["0.148.0"],
-      "operatingSystems": ["windows"],
-      "authModes": ["oauth", "manual"],
-      "minimumSupport": {
-        "minimumVersion": null,
-        "enforcedBy": "omitting/disabling capability",
-        "capability": "host-specific lifecycle automation",
-        "certification": "Windows 0.148.0 validates the OAuth artifact and exact manual config.toml owner block; authenticated lifecycle hooks remain omitted pending credential and Git-root certification"
-      }
-    },
-    "claude": {
-      "testedVersions": ["2.1.193", "2.1.195", "2.1.237"],
       "operatingSystems": ["windows", "macos", "linux"],
       "authModes": ["oauth", "manual"],
       "minimumSupport": {
         "minimumVersion": null,
         "enforcedBy": "omitting/disabling capability",
         "capability": "host-specific lifecycle automation",
-        "certification": "2.1.193 transport-only certification uses the explicit-space fallback; 2.1.195 invokes headersHelper; 2.1.237 certifies OAuth and manual override routing"
+        "certification": "0.148.0 is the only v0.1.0 release-candidate version; the declaration includes Windows, macOS, Linux, OAuth, and manual recovery, while final certification remains gated on external evidence for every cell"
       }
     },
-    "gemini": {
-      "testedVersions": ["0.56.0"],
-      "operatingSystems": ["windows"],
+    "claude": {
+      "testedVersions": ["2.1.237"],
+      "operatingSystems": ["windows", "macos", "linux"],
       "authModes": ["oauth", "manual"],
       "minimumSupport": {
         "minimumVersion": null,
         "enforcedBy": "omitting/disabling capability",
         "capability": "host-specific lifecycle automation",
-        "certification": "Windows 0.56.0 validates one OAuth-enabled server with a sensitive recovery-only PARLEY_TOKEN; stored OAuth overrides manual and authenticated lifecycle hooks remain omitted"
+        "certification": "2.1.237 is the only v0.1.0 release-candidate version; older versions retain the documented lower-capability explicit-space path but are not certified for v0.1.0, and final certification remains gated on external evidence for every cell"
+      }
+    },
+    "gemini": {
+      "testedVersions": ["0.56.0"],
+      "operatingSystems": ["windows", "macos", "linux"],
+      "authModes": ["oauth", "manual"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "0.56.0 is the only v0.1.0 release-candidate version; the declaration includes Windows, macOS, Linux, OAuth, and manual recovery, while final certification remains gated on external evidence for every cell"
       }
     }
   }
