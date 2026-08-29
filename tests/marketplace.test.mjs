@@ -83,6 +83,21 @@ test("committed marketplace packages are byte-identical to deterministic native 
   }
 });
 
+test("marketplace synchronization stages on the repository filesystem", async () => {
+  const sentinel = new Error("staging factory reached");
+  await assert.rejects(
+    syncMarketplaceSnapshots({
+      root: repositoryRoot,
+      check: true,
+      stagingDirectoryFactory: async (prefix) => {
+        assert.equal(dirname(prefix), repositoryRoot);
+        throw sentinel;
+      },
+    }),
+    sentinel,
+  );
+});
+
 test("README gives one exact native install path per host without claiming availability", async () => {
   const packageJson = await readJson(join(repositoryRoot, "package.json"));
   const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");

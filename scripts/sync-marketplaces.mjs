@@ -5,7 +5,6 @@ import {
   readdir,
   rm,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -106,11 +105,12 @@ async function assertTree(actualRoot, expectedRoot) {
 export async function syncMarketplaceSnapshots({
   root = projectRoot(),
   check = false,
+  stagingDirectoryFactory = mkdtemp,
 } = {}) {
   const absoluteRoot = resolve(root);
   const packageJson = JSON.parse(await readFile(join(absoluteRoot, "package.json"), "utf8"));
   const expectedCatalogs = catalogs(packageJson.version);
-  const stagingRoot = await mkdtemp(join(tmpdir(), "parley-marketplace-sync-"));
+  const stagingRoot = await stagingDirectoryFactory(join(absoluteRoot, ".parley-marketplace-sync-"));
   try {
     await buildArtifacts({
       version: packageJson.version,

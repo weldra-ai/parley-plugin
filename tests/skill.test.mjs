@@ -8,7 +8,6 @@ import { buildArtifacts, readZipEntries } from "../scripts/build.mjs";
 const sharedWorkflowPaths = [
   "skills/parley/SKILL.md",
   "hooks/session-reminder.mjs",
-  "hooks/manual-unread.mjs",
   "scripts/managed-config.mjs",
   "commands/connect.md",
   "commands/connect-manual.md",
@@ -44,6 +43,7 @@ test("build materializes the complete shared workflow into every native artifact
       for (const sharedPath of sharedWorkflowPaths) {
         assert.ok(paths.has(sharedPath), `${artifact.host} is missing ${sharedPath}`);
       }
+      assert.equal(paths.has("hooks/manual-unread.mjs"), false, `${artifact.host} includes an unused credential-bearing hook`);
     }
   } finally {
     await rm(outputDir, { recursive: true, force: true });

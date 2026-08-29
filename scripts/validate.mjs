@@ -19,7 +19,7 @@ const ENFORCEMENT_MODES = new Set([
 ]);
 export const TRUSTED_MCP_ORIGIN = "https://parley.weldra.dev/mcp";
 const CLAUDE_HEADERS_HELPER = "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\"";
-const TRUSTED_CLAUDE_SPACE_HELPER_SHA256 = "b03210c959f1efdbdaabf816ab1c5382acd3571f648d99a522cf5e03fb00df7b";
+const TRUSTED_CLAUDE_SPACE_HELPER_SHA256 = "cc7817a8087b89081173cf051cbbca1b27722010e3ad7e891d637598b501690e";
 const FORBIDDEN_AUTH_HEADER_NAMES = new Set([
   "authorization",
   "proxy-authorization",

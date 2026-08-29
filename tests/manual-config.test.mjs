@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import * as managerProduction from "../shared/scripts/managed-config.mjs";
 
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
-const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const managerPath = join(repositoryRoot, "shared", "scripts", "managed-config.mjs");
 const windowsTestSid = "S-1-5-21-1-2-3-4";
 const windowsFixtureExecutable = "C:\\Windows\\System32\\fixture.exe";
 
@@ -368,6 +369,45 @@ test("Codex host validation receives only the exact selected CODEX_HOME and stat
     assert.equal(calls[0].configPath, configPath);
     assert.equal(JSON.stringify(calls[0].args).includes(runtimeSentinel("z")), false);
   });
+});
+
+test("Codex host validation resolves the Windows CLI before invoking the trusted command processor", async () => {
+  await withCodexProfile(async ({ profileDir, configPath }) => {
+    const resolvedCodex = "C:\\trusted-bin\\codex.cmd";
+    const calls = [];
+    await manager.validateCodexHostProfile({
+      profileDir,
+      configPath,
+      platform: "win32",
+      environment: {
+        SystemRoot: "C:\\Windows",
+        windir: "C:\\Windows",
+        PATH: "C:\\trusted-bin",
+        PATHEXT: ".EXE;.CMD",
+      },
+      hostExecutableResolver: async (name) => {
+        assert.equal(name, "codex");
+        return resolvedCodex;
+      },
+      hostRunner: async (input) => {
+        calls.push(input);
+        return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].executable, "C:\\Windows\\System32\\cmd.exe");
+    assert.match(calls[0].args.at(-1), /C:\\trusted-bin\\codex\.cmd/i);
+    assert.doesNotMatch(calls[0].args.at(-1), /^codex\s/i);
+  });
+});
+
+test("Codex PowerShell wrapper resolves Node outside the project before sending a token", async () => {
+  const powershell = await readFile(join(repositoryRoot, "hosts", "codex", "scripts", "connect-manual.ps1"), "utf8");
+  assert.match(powershell, /FileName\s*=\s*\$nodePath/i);
+  assert.doesNotMatch(powershell, /FileName\s*=\s*["']node["']/i);
+  assert.match(powershell, /&\s+\$nodePath\s+\$manager\s+codex\s+oauth/i);
+  assert.doesNotMatch(powershell, /&\s+node\b/i);
 });
 
 test("Codex rollback preserves the Windows ACL runner and system-path seam", async () => {

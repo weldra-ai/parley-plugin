@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  copyFile,
   mkdtemp,
   mkdir,
   readFile,
@@ -235,11 +236,15 @@ test("Claude manual and OAuth command wrappers keep credentials out of arguments
 
   assert.match(manualPowerShell, /Read-Host.+AsSecureString/i);
   assert.match(manualPowerShell, /RedirectStandardInput/i);
+  assert.match(manualPowerShell, /FileName\s*=\s*\$nodePath/i);
+  assert.doesNotMatch(manualPowerShell, /FileName\s*=\s*["']node["']/i);
   assert.doesNotMatch(manualPowerShell, /-Token\b/i);
   assert.match(manualShell, /stty -echo/);
   assert.match(manualShell, /node "\$manager" claude manual/);
   assert.doesNotMatch(manualShell, /\$token[^\n]*node/i);
   assert.match(oauthPowerShell, /managed-config\.mjs/);
+  assert.match(oauthPowerShell, /&\s+\$nodePath\s+\$manager\s+claude\s+oauth/i);
+  assert.doesNotMatch(oauthPowerShell, /&\s+node\b/i);
   assert.match(oauthShell, /node "\$script_dir\/managed-config\.mjs" claude oauth/);
 });
 
@@ -362,6 +367,21 @@ test("Claude helper fails closed for missing Git and emits parseable escaped JSO
     });
     assert.equal(missingGit.code, 0, missingGit.stderr.toString("utf8"));
     assert.deepEqual(JSON.parse(missingGit.stdout.toString("utf8")), {});
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude helper never resolves Git from an untrusted project directory on Windows", { skip: process.platform !== "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "parley-claude-helper-path-hijack-"));
+  try {
+    const origin = "https://github.com/weldra-ai/parley.git";
+    const repo = await makeRepository(root, "repository", { name: "origin", url: origin });
+    await copyFile(process.execPath, join(repo, "git.exe"));
+
+    const result = await run(process.execPath, [helperPath, repo], { cwd: repo });
+    assert.equal(result.code, 0, result.stderr.toString("utf8"));
+    assert.deepEqual(JSON.parse(result.stdout.toString("utf8")), { "X-Space": origin });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

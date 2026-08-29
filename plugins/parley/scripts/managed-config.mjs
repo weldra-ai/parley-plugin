@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, win32 as windowsPath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1299,15 +1299,69 @@ function codexHostValidationEnvironment(profileDir, environment) {
   return result;
 }
 
-function codexHostValidationInvocation(environment, platform) {
+function unquotedPathEntry(value) {
+  const trimmed = value.trim();
+  return trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')
+    ? trimmed.slice(1, -1)
+    : trimmed;
+}
+
+async function defaultHostExecutableResolver(name, { environment, platform }) {
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    throw new Error("invalid host executable name");
+  }
+  const pathValue = copiedEnvironmentValue(environment, "PATH");
+  if (pathValue === undefined) {
+    throw new Error("host executable PATH is unavailable");
+  }
+  const pathApi = platform === "win32" ? windowsPath : { isAbsolute, join };
+  const delimiter = platform === "win32" ? ";" : ":";
+  const executableNames = platform === "win32"
+    ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`]
+    : [name];
+  for (const rawDirectory of pathValue.split(delimiter)) {
+    const directory = unquotedPathEntry(rawDirectory);
+    if (!directory || !pathApi.isAbsolute(directory)) {
+      continue;
+    }
+    for (const executableName of executableNames) {
+      const candidate = pathApi.join(directory, executableName);
+      try {
+        const resolved = await realpath(candidate);
+        const stat = await lstat(resolved);
+        if (stat.isFile() && (platform === "win32" || (stat.mode & 0o111) !== 0)) {
+          return resolved;
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
+          throw error;
+        }
+      }
+    }
+  }
+  throw new Error("host executable was not found in an absolute PATH directory");
+}
+
+async function codexHostValidationInvocation(environment, platform, hostExecutableResolver) {
+  const codexExecutable = await hostExecutableResolver("codex", { environment, platform });
+  const pathApi = platform === "win32" ? windowsPath : { isAbsolute };
+  if (typeof codexExecutable !== "string" || !pathApi.isAbsolute(codexExecutable)) {
+    throw new Error("host executable resolver returned a relative path");
+  }
   if (platform === "win32") {
+    if (/\.exe$/i.test(codexExecutable)) {
+      return { executable: codexExecutable, args: ["mcp", "list"] };
+    }
+    if (!/\.(?:cmd|bat)$/i.test(codexExecutable) || /[\u0000\r\n"%]/.test(codexExecutable)) {
+      throw new Error("host executable resolver returned an unsafe Windows command path");
+    }
     const { systemRoot } = trustedWindowsSystemContext(environment);
     return {
       executable: windowsPath.join(systemRoot, "System32", "cmd.exe"),
-      args: ["/d", "/s", "/c", "codex mcp list"],
+      args: ["/d", "/q", "/v:off", "/s", "/c", `""${codexExecutable}" mcp list"`],
     };
   }
-  return { executable: "codex", args: ["mcp", "list"] };
+  return { executable: codexExecutable, args: ["mcp", "list"] };
 }
 
 function defaultCodexHostRunner({ executable, args, environment, timeoutMs }) {
@@ -1373,13 +1427,18 @@ export async function validateCodexHostProfile({
   hostRunner = defaultCodexHostRunner,
   environment = process.env,
   platform = process.platform,
+  hostExecutableResolver = defaultHostExecutableResolver,
 } = {}) {
   try {
     const paths = codexManagedPaths(profileDir);
-    if (configPath !== paths.configPath || typeof hostRunner !== "function") {
+    if (
+      configPath !== paths.configPath ||
+      typeof hostRunner !== "function" ||
+      typeof hostExecutableResolver !== "function"
+    ) {
       throw new Error("invalid host validation input");
     }
-    const invocation = codexHostValidationInvocation(environment, platform);
+    const invocation = await codexHostValidationInvocation(environment, platform, hostExecutableResolver);
     const result = await hostRunner({
       ...invocation,
       configPath: paths.configPath,

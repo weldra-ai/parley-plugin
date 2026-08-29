@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep, win32 as windowsPath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PROJECT_ROOT_PLACEHOLDER = "${CLAUDE_PROJECT_DIR}";
@@ -13,6 +13,73 @@ function realpathOrNull(path) {
   } catch {
     return null;
   }
+}
+
+function environmentPath(environment, platform) {
+  if (platform !== "win32") {
+    return typeof environment.PATH === "string" ? environment.PATH : null;
+  }
+  const values = Object.entries(environment)
+    .filter(([name, value]) => name.toLowerCase() === "path" && typeof value === "string")
+    .map(([, value]) => value);
+  return values.length === 1 ? values[0] : null;
+}
+
+function unquotedPathEntry(value) {
+  const trimmed = value.trim();
+  return trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')
+    ? trimmed.slice(1, -1)
+    : trimmed;
+}
+
+function isInside(candidate, root, platform) {
+  const normalize = (value) => platform === "win32" ? value.toLowerCase() : value;
+  const normalizedCandidate = normalize(candidate);
+  const normalizedRoot = normalize(root);
+  const separator = platform === "win32" ? "\\" : sep;
+  const prefix = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`;
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(prefix);
+}
+
+export function resolveGitExecutable({
+  environment = process.env,
+  platform = process.platform,
+  projectRoot,
+} = {}) {
+  const pathValue = environmentPath(environment, platform);
+  if (pathValue === null) {
+    return null;
+  }
+  const pathApi = platform === "win32" ? windowsPath : { isAbsolute, join };
+  const delimiter = platform === "win32" ? ";" : ":";
+  const executableNames = platform === "win32" ? ["git.exe"] : ["git"];
+  const resolvedProject = typeof projectRoot === "string" ? realpathOrNull(projectRoot) : null;
+  for (const rawDirectory of pathValue.split(delimiter)) {
+    const directory = unquotedPathEntry(rawDirectory);
+    if (!directory || !pathApi.isAbsolute(directory)) {
+      continue;
+    }
+    for (const executableName of executableNames) {
+      const executable = realpathOrNull(pathApi.join(directory, executableName));
+      if (executable === null) {
+        continue;
+      }
+      let stat;
+      try {
+        stat = lstatSync(executable);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile() || (platform !== "win32" && (stat.mode & 0o111) === 0)) {
+        continue;
+      }
+      if (resolvedProject !== null && isInside(executable, resolvedProject, platform)) {
+        continue;
+      }
+      return executable;
+    }
+  }
+  return null;
 }
 
 export function selectProjectRoot(projectArg, cwd, helperPath) {
@@ -34,7 +101,7 @@ export function selectProjectRoot(projectArg, cwd, helperPath) {
 }
 
 export function runLocalGit(cwd, args, timeoutMs, {
-  command = "git",
+  command,
   commandArguments = [],
 } = {}) {
   return new Promise((resolvePromise) => {
@@ -55,7 +122,12 @@ export function runLocalGit(cwd, args, timeoutMs, {
       child?.kill("SIGKILL");
     }, timeoutMs);
     try {
-      child = spawn(command, [...commandArguments, ...args], {
+      const executable = command ?? resolveGitExecutable({ projectRoot: cwd });
+      if (executable === null || !isAbsolute(executable)) {
+        finish({ code: null });
+        return;
+      }
+      child = spawn(executable, [...commandArguments, ...args], {
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "ignore"],
