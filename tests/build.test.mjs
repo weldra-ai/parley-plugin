@@ -574,6 +574,19 @@ test("CI installs pinned native validators before pnpm validate", async () => {
   assert.match(pnpmWorkspace, /node-pty: false/);
 });
 
+test("workflows do not ask setup-node to cache pnpm before Corepack installs it", async () => {
+  for (const workflowName of ["ci.yml", "release.yml"]) {
+    const workflow = await readFile(join(repositoryRoot, ".github", "workflows", workflowName), "utf8");
+    const lines = workflow.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.includes("uses: actions/setup-node@"));
+    assert.notEqual(start, -1, `${workflowName} must configure Node`);
+    const indentation = lines[start].match(/^\s*/)[0];
+    const end = lines.findIndex((line, index) => index > start && line.startsWith(`${indentation}- `));
+    const setupNodeStep = lines.slice(start, end === -1 ? undefined : end).join("\n");
+    assert.doesNotMatch(setupNodeStep, /^\s+cache:\s*pnpm\s*$/m, workflowName);
+  }
+});
+
 test("release imports and constrains the configured signer before verifying the exact tag", async () => {
   const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
   const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");
