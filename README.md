@@ -1,10 +1,10 @@
 # Parley agent plugins
 
-This repository is the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. Native catalog metadata is prepared here, but no remote, tag, listing, or published release exists yet. The packages are not yet available; see [docs/CERTIFICATION.md](docs/CERTIFICATION.md) for the gates that must be completed first.
+This public repository exists as the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. Native catalog metadata is prepared here, but no release tag, listing, or published release exists yet. The packages are not yet available; see [docs/CERTIFICATION.md](docs/CERTIFICATION.md) for the gates that must be completed first.
 
 ## Planned installation
 
-These are the exact public install paths reserved for the first signed release. They are **not yet available** until `weldra-ai/parley-plugin` exists publicly and the matching tag passes the release gate.
+These are the exact public install paths reserved for the first signed release. They are **not yet available** until the matching tag passes the release gate.
 
 Codex:
 
@@ -61,9 +61,13 @@ custom artifact directories. It does not authenticate a host, create a
 real signed report, or satisfy the required stage, production, cross-agent, beta, signing, publication, or
 rollback gates.
 
-## Release signer configuration
+## Candidate and release signing
 
-The release workflow accepts only an annotated `v${package.version}` tag signed by the configured public key. Before enabling releases, add these repository **Variables** (not secrets):
+The release workflow accepts only an annotated `candidate/v${package.version}` or `v${package.version}` tag signed by the configured public key. A candidate tag builds the exact release artifacts and stores them in an unpublished draft GitHub Release. The final tag must point to the same commit as its signed candidate tag; the workflow rebuilds that commit, requires a byte-for-byte match with the draft assets, and publishes those candidate assets.
+
+Before creating either tag, an active repository tag ruleset with no bypass actors must prevent updates and deletions for `candidate/v*` and `v*`. The draft is visible to users with push access, but it is not a published release or native marketplace listing.
+
+Before enabling either path, add these repository **Variables** (not secrets):
 
 - `PARLEY_RELEASE_SIGNER_PUBLIC_KEY`: public verification key material only (ASCII-armored); it must not contain private-key material.
 - `PARLEY_RELEASE_SIGNER_FINGERPRINT`: the authorized primary-key fingerprint (40-character v4 or 64-character v5 hexadecimal); whitespace and case are normalized before an exact comparison.

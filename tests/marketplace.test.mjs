@@ -111,5 +111,7 @@ test("README gives one exact native install path per host without claiming avail
     [...readme.matchAll(/(?:--ref |parley-plugin@)(v\d+\.\d+\.\d+)/g)].map((match) => match[1]),
     Array(3).fill(`v${packageJson.version}`),
   );
+  assert.match(readme, /public repository exists/i);
+  assert.doesNotMatch(readme, /until `weldra-ai\/parley-plugin` exists publicly/i);
   assert.match(readme, /not yet available/i);
 });

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "candidate/v*"
 
 permissions:
   contents: write
@@ -30,9 +31,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${GITHUB_REF#refs/tags/}"
           version="$(node --input-type=module -e 'import fs from "node:fs"; console.log(JSON.parse(fs.readFileSync("package.json", "utf8")).version)')"
-          test "${tag}" = "v${version}"
+          case "${tag}" in
+            "candidate/v${version}") release_mode="candidate" ;;
+            "v${version}") release_mode="publish" ;;
+            *)
+              echo "Tag must be candidate/v${version} or v${version}."
+              exit 1
+              ;;
+          esac
           git cat-file -e "${tag}^{tag}"
           test -n "${PARLEY_RELEASE_SIGNER_PUBLIC_KEY}"
           test -n "${PARLEY_RELEASE_SIGNER_FINGERPRINT}"
@@ -57,6 +65,17 @@ jobs:
           test -n "${actual_fingerprint}"
           test "${expected_fingerprint}" = "${actual_fingerprint}"
           git verify-tag "${tag}" >/dev/null 2>&1
+          if [ "${release_mode}" = "publish" ]; then
+            candidate_tag="candidate/v${version}"
+            git cat-file -e "${candidate_tag}^{tag}"
+            git verify-tag "${candidate_tag}" >/dev/null 2>&1
+            candidate_commit="$(git rev-parse "${candidate_tag}^{commit}")"
+            release_commit="$(git rev-parse "${tag}^{commit}")"
+            if [ "${candidate_commit}" != "${release_commit}" ]; then
+              echo "Final release tag must point to the certified candidate commit."
+              exit 1
+            fi
+          fi
       - run: pnpm install --frozen-lockfile
       - run: python -m pip install --disable-pip-version-check -r tools/codex-plugin-validator/requirements.txt
       - run: pnpm test
@@ -64,8 +83,25 @@ jobs:
       - run: pnpm validate
       - run: pnpm scan-secrets
       - run: pnpm prepare-release
-      - name: Upload one coherent artifact set
+      - name: Retain candidate artifacts in an unpublished draft
+        if: startsWith(github.ref, 'refs/tags/candidate/')
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
-        run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag
+        run: gh release create "${GITHUB_REF_NAME}" release/* --draft --verify-tag --title "Parley plugin ${GITHUB_REF_NAME}"
+      - name: Publish the exact candidate artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tag="candidate/${GITHUB_REF_NAME}"
+          test "$(gh release view "${candidate_tag}" --json isDraft --jq '.isDraft')" = "true"
+          candidate_dir="$(mktemp -d)"
+          trap 'rm -rf "${candidate_dir}"' EXIT
+          gh release download "${candidate_tag}" --dir "${candidate_dir}"
+          diff --brief --recursive --no-dereference release "${candidate_dir}"
+          gh release create "${GITHUB_REF_NAME}" "${candidate_dir}"/* --verify-tag
