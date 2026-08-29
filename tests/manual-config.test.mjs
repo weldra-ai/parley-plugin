@@ -359,6 +359,9 @@ test("Codex host validation receives only the exact selected CODEX_HOME and stat
     await manager.validateCodexHostProfile({
       profileDir,
       configPath,
+      hostExecutableResolver: async () => process.platform === "win32"
+        ? "C:\\trusted-bin\\codex.exe"
+        : "/opt/parley-fixture/codex",
       hostRunner: async (input) => {
         calls.push(input);
         return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
