@@ -17,6 +17,8 @@ const ENFORCEMENT_MODES = new Set([
   "certified host-local helper",
   "omitting/disabling capability",
 ]);
+const REQUIRED_OPERATING_SYSTEMS = ["windows", "macos", "linux"];
+const REQUIRED_AUTH_MODES = ["oauth", "manual"];
 export const TRUSTED_MCP_ORIGIN = "https://parley.weldra.dev/mcp";
 const CLAUDE_HEADERS_HELPER = "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\"";
 const TRUSTED_CLAUDE_SPACE_HELPER_SHA256 = "cc7817a8087b89081173cf051cbbca1b27722010e3ad7e891d637598b501690e";
@@ -211,8 +213,14 @@ function validateCompatibility(compatibility) {
     if (!Array.isArray(declaration.testedVersions) || !Array.isArray(declaration.operatingSystems) || !Array.isArray(declaration.authModes)) {
       throw new Error(`Compatibility for ${host} must record versions, operating systems, and auth modes.`);
     }
-    if (!declaration.authModes.includes("oauth")) {
-      throw new Error(`Compatibility for ${host} must declare OAuth support.`);
+    if (declaration.testedVersions.length === 0 || declaration.testedVersions.some((version) => typeof version !== "string" || version.length === 0)) {
+      throw new Error(`Compatibility for ${host} must declare at least one tested version.`);
+    }
+    if (JSON.stringify(declaration.operatingSystems) !== JSON.stringify(REQUIRED_OPERATING_SYSTEMS)) {
+      throw new Error(`Compatibility for ${host} must declare exactly Windows, macOS, and Linux.`);
+    }
+    if (JSON.stringify(declaration.authModes) !== JSON.stringify(REQUIRED_AUTH_MODES)) {
+      throw new Error(`Compatibility for ${host} must declare exactly OAuth and manual authentication.`);
     }
     const minimum = assertObject(declaration.minimumSupport, `Minimum support for ${host}`);
     if (!ENFORCEMENT_MODES.has(minimum.enforcedBy)) {

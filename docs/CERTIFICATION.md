@@ -33,8 +33,9 @@ The backend release verifier accepts a signed report only when it matches the ex
 plugin tag/version and is verified against an operator-supplied Ed25519 public key and a separate trusted
 copy of the exact candidate `compatibility.json` declaration. Every declared host version in that input must cover
 Windows, macOS, Linux, OAuth, and manual authentication, which sets every host-version/OS/auth matrix cell that the
-report must cover. The current Windows-only Codex and Gemini input is provisional and is rejected by that release
-gate. The report must bind artifact SHA-256 values; raw client-id hashes and
+report must cover. The r3 source declaration pins Codex 0.148.0, Claude Code 2.1.237, and Gemini 0.56.0, producing
+18 required cells. That declaration makes the matrix structurally eligible; it is not evidence that any cell passed.
+The report must bind artifact SHA-256 values; raw client-id hashes and
 classification methods; CIMD safety controls matched exactly to the CIMD method; all six directional pairs
 whose endpoints each bind the declared host/version/OS/auth tuple, exact artifact SHA-256, and exact plugin
 tag/version; local gate, privacy, and beta-usability evidence; exact stage/prod SHAs; signature identity; and
@@ -44,14 +45,21 @@ content, raw client ids, remotes, and paths are prohibited and make the evidence
 
 ## Required external gates
 
-These remain pending until independently completed and recorded:
+The release infrastructure already established for the rejected r2 candidate is:
 
 - creation of the public `weldra-ai/parley-plugin` repository, the `gemini-cli-extension` repository topic,
   and read-only verification of the committed Codex and Claude catalogs from the exact candidate commit;
 - an active repository tag ruleset with no bypass actors that prevents updates and deletions for
-  `candidate/v*` and `v*` before either tag is created;
-- an annotated, release-signer-signed `candidate/v0.1.0-r2` tag on the exact candidate commit, followed by a
-  successful `Release plugin artifacts` run; that run stores the checksummed artifacts in an unpublished draft
+  `candidate/v*` and `v*` before either tag is created (ruleset `21794883`); and
+- signed tag `candidate/v0.1.0-r2` (tag object `efbdac105cfa9cbc726e04798ec845ff4c581057`, peeled commit
+  `c711462d7d42825512f5dfe17ba781a035a5be07`) plus successful workflow run `33247655780`, which stored nine
+  checksummed assets in an unpublished draft GitHub Release. The r2 compatibility declaration is ineligible for
+  the combined verifier, so none of its artifact evidence authorizes r3 or the final release.
+
+These gates remain pending until independently completed and recorded for r3:
+
+- an annotated, release-signer-signed `candidate/v0.1.0-r3` tag on the exact candidate commit, followed by a
+  successful `Release plugin artifacts` run; that run must store the checksummed artifacts in an unpublished draft
   GitHub Release visible to users with push access, not a published package or listing;
 - the exact compatibility declaration and retained candidate artifact checksums bound before clean-profile or
   pair evidence;

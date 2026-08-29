@@ -1,6 +1,6 @@
 # Parley agent plugins
 
-This public repository exists as the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. Native catalog metadata is prepared here, but no release tag, listing, or published release exists yet. The packages are not yet available; see [docs/CERTIFICATION.md](docs/CERTIFICATION.md) for the gates that must be completed first.
+This public repository exists as the canonical source for Parley packages targeting Codex, Claude Code, and Gemini CLI. The rejected r2 candidate remains an unpublished draft; r3 exists only as source until its signed candidate tag and workflow succeed. No final `v0.1.0` tag, listing, or published release exists yet. The packages are not yet available; see [docs/CERTIFICATION.md](docs/CERTIFICATION.md) for the gates that must be completed first.
 
 ## Planned installation
 
@@ -77,7 +77,7 @@ The workflow imports that public key into an isolated temporary GnuPG home, reje
 ## Compatibility status
 
 `compatibility.json` records provisional tested-version, operating-system, and authentication declaration
-inputs plus enforcement posture. It is not host-version certification or release evidence. The current Windows-only
-Codex and Gemini declarations cannot authorize the release verifier: an operator-trusted candidate must declare
-Windows, macOS, Linux, OAuth, and manual authentication for every supported host version before the signed backend
-report can cover every required matrix cell.
+inputs plus enforcement posture. It is not host-version certification or release evidence. The r3 source declaration
+pins Codex 0.148.0, Claude Code 2.1.237, and Gemini 0.56.0; each declares Windows, macOS, Linux, OAuth, and manual
+authentication. The signed backend report must still supply external evidence for all 18 declared matrix cells before
+the final release can be authorized.

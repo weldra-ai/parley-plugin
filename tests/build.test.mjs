@@ -94,22 +94,22 @@ function geminiManifest() {
 }
 
 function compatibility() {
-  const host = {
-    testedVersions: [],
+  const host = () => ({
+    testedVersions: ["1.0.0"],
     operatingSystems: ["windows", "macos", "linux"],
-    authModes: ["oauth"],
+    authModes: ["oauth", "manual"],
     minimumSupport: {
       minimumVersion: null,
       enforcedBy: "omitting/disabling capability",
       capability: "host-specific lifecycle automation",
       certification: "pending",
     },
-  };
+  });
   return {
     schemaVersion: 1,
     canonicalMcpOrigin: canonicalOrigin,
     lifecycleMode: "oauth",
-    hosts: { codex: host, claude: host, gemini: host },
+    hosts: { codex: host(), claude: host(), gemini: host() },
   };
 }
 
@@ -525,6 +525,41 @@ test("validator pins compatibility and every host manifest to the trusted MCP or
   });
 });
 
+test("validator rejects an incomplete release compatibility matrix", async (t) => {
+  const cases = [
+    {
+      name: "missing tested host version",
+      mutate: (declaration) => { declaration.testedVersions = []; },
+      error: /at least one tested version/i,
+    },
+    {
+      name: "missing required operating system",
+      mutate: (declaration) => { declaration.operatingSystems = ["windows", "macos"]; },
+      error: /exactly Windows, macOS, and Linux/i,
+    },
+    {
+      name: "missing manual authentication",
+      mutate: (declaration) => { declaration.authModes = ["oauth"]; },
+      error: /exactly OAuth and manual/i,
+    },
+  ];
+
+  for (const host of ["codex", "claude", "gemini"]) {
+    for (const { name, mutate, error } of cases) {
+      await t.test(`${host}: ${name}`, async () => {
+        await withFixture(async (sourceDir) => {
+          const declaration = compatibility();
+          mutate(declaration.hosts[host]);
+          await writeJson(join(sourceDir, "compatibility.json"), declaration);
+          const outputDir = join(sourceDir, "dist");
+          await buildArtifacts({ version: "0.1.0", outputDir, sourceDir });
+          await assert.rejects(validateArtifacts({ root: sourceDir, outputDir }), error);
+        });
+      });
+    }
+  }
+});
+
 test("native validation plans the pinned Codex, Claude, and Gemini gates without a skip path", async () => {
   const calls = [];
   await runNativeValidators({
@@ -644,7 +679,7 @@ test("signed candidate tags retain exact release artifacts in an unpublished dra
   const certification = await readFile(join(repositoryRoot, "docs", "CERTIFICATION.md"), "utf8");
   const packageJson = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
 
-  assert.equal(packageJson.releaseCandidate, 2);
+  assert.equal(packageJson.releaseCandidate, 3);
   assert.match(release, /- "candidate\/v\*"/);
   assert.match(release, /tag="\$\{GITHUB_REF#refs\/tags\/\}"/);
   assert.match(release, /candidate_revision=/);
@@ -657,7 +692,7 @@ test("signed candidate tags retain exact release artifacts in an unpublished dra
   assert.doesNotMatch(release, /actions\/upload-artifact/);
   assert.doesNotMatch(release, /actions\/download-artifact/);
   assert.equal(release.match(/gh release create/g)?.length, 2);
-  assert.match(certification, /candidate\/v0\.1\.0-r2/);
+  assert.match(certification, /candidate\/v0\.1\.0-r3/);
   assert.match(certification, /unpublished draft\s+GitHub Release/i);
   assert.match(certification, /tag ruleset with no bypass actors/i);
   assert.match(certification, /prevents updates and deletions/i);

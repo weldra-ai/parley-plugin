@@ -56,9 +56,9 @@ async function writeJson(path, value) {
 
 function compatibility() {
   const host = {
-    testedVersions: [],
+    testedVersions: ["1.0.0"],
     operatingSystems: ["windows", "macos", "linux"],
-    authModes: ["oauth"],
+    authModes: ["oauth", "manual"],
     minimumSupport: {
       minimumVersion: null,
       enforcedBy: "omitting/disabling capability",
@@ -205,14 +205,16 @@ test("Claude artifact is OAuth-only and has a SessionStart-only reminder", async
   assert.equal(JSON.stringify(hooks).includes("UserPromptSubmit"), false);
 });
 
-test("Claude compatibility records the lower-capability explicit-space fallback without a plugin minimum", async () => {
+test("Claude compatibility pins the v0.1.0 release matrix without claiming older versions are certified", async () => {
   const compatibility = JSON.parse(await readFile(join(repositoryRoot, "compatibility.json"), "utf8"));
   const claude = compatibility.hosts.claude;
 
-  assert.deepEqual(claude.testedVersions, ["2.1.193", "2.1.195", "2.1.237"]);
+  assert.deepEqual(claude.testedVersions, ["2.1.237"]);
+  assert.deepEqual(claude.operatingSystems, ["windows", "macos", "linux"]);
   assert.deepEqual(claude.authModes, ["oauth", "manual"]);
   assert.equal(claude.minimumSupport.minimumVersion, null);
-  assert.match(claude.minimumSupport.certification, /2\.1\.193.*transport-only.*explicit-space.*2\.1\.195.*headersHelper.*2\.1\.237/i);
+  assert.match(claude.minimumSupport.certification, /older versions.*lower-capability.*not certified/i);
+  assert.match(claude.minimumSupport.certification, /final certification.*external evidence/i);
 });
 
 test("Claude README documents the lower-capability explicit-space recovery without guessing", async () => {
