@@ -48,8 +48,13 @@ These remain pending until independently completed and recorded:
 
 - creation of the public `weldra-ai/parley-plugin` repository, the `gemini-cli-extension` repository topic,
   and read-only verification of the committed Codex and Claude catalogs from the exact candidate commit;
-- immutable candidate tag plus built/signed checksums first, with the exact compatibility declaration bound
-  before clean-profile or pair evidence; this does not publish a package or listing;
+- an active repository tag ruleset with no bypass actors that prevents updates and deletions for
+  `candidate/v*` and `v*` before either tag is created;
+- an annotated, release-signer-signed `candidate/v0.1.0` tag on the exact candidate commit, followed by a
+  successful `Release plugin artifacts` run; that run stores the checksummed artifacts in an unpublished draft
+  GitHub Release visible to users with push access, not a published package or listing;
+- the exact compatibility declaration and retained candidate artifact checksums bound before clean-profile or
+  pair evidence;
 - stage deployment and schema/legacy installer checks for the exact backend SHA, followed by candidate
   artifact signature/checksum verification and only reviewed stage issuance flags;
 - clean-profile OAuth and manual recovery for every approved compatibility cell; the release declaration must

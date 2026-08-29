@@ -639,16 +639,55 @@ test("release publishes certified archives plus platform-selectable Gemini alias
   assert.doesNotMatch(release, /gh release create[^\n]+dist\/\*/);
 });
 
+test("signed candidate tags retain exact release artifacts in an unpublished draft", async () => {
+  const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+  const certification = await readFile(join(repositoryRoot, "docs", "CERTIFICATION.md"), "utf8");
+
+  assert.match(release, /- "candidate\/v\*"/);
+  assert.match(release, /tag="\$\{GITHUB_REF#refs\/tags\/\}"/);
+  assert.match(release, /"candidate\/v\$\{version\}"\)/);
+  assert.match(release, /"v\$\{version\}"\)/);
+  assert.match(release, /^permissions:\s*\n\s+contents: write$/m);
+  assert.match(release, /if: startsWith\(github\.ref, 'refs\/tags\/candidate\/'\)/);
+  assert.match(release, /gh release create "\$\{GITHUB_REF_NAME\}" release\/\* --draft --verify-tag/);
+  assert.doesNotMatch(release, /actions\/upload-artifact/);
+  assert.doesNotMatch(release, /actions\/download-artifact/);
+  assert.equal(release.match(/gh release create/g)?.length, 2);
+  assert.match(certification, /candidate\/v0\.1\.0/);
+  assert.match(certification, /unpublished draft\s+GitHub Release/i);
+  assert.match(certification, /tag ruleset with no bypass actors/i);
+  assert.match(certification, /prevents updates and deletions/i);
+});
+
+test("final release tag must bind the signed candidate commit", async () => {
+  const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+
+  assert.match(release, /candidate_tag="candidate\/v\$\{version\}"/);
+  assert.match(release, /git cat-file -e "\$\{candidate_tag\}\^\{tag\}"/);
+  assert.match(release, /git verify-tag "\$\{candidate_tag\}"/);
+  assert.match(release, /git rev-parse "\$\{candidate_tag\}\^\{commit\}"/);
+  assert.match(release, /git rev-parse "\$\{tag\}\^\{commit\}"/);
+  assert.match(release, /Final release tag must point to the certified candidate commit/);
+  assert.match(release, /gh release download "\$\{candidate_tag\}" --dir "\$\{candidate_dir\}"/);
+  assert.match(release, /diff --brief --recursive --no-dereference release "\$\{candidate_dir\}"/);
+  assert.match(release, /gh release create "\$\{GITHUB_REF_NAME\}" "\$\{candidate_dir\}"\/\* --verify-tag/);
+});
+
 test("CI and release pin every required GitHub Action to the resolved immutable commit", async () => {
-  const expectedPins = new Map([
+  const commonPins = new Map([
     ["actions/checkout", { sha: "11d5960a326750d5838078e36cf38b85af677262", version: "v4" }],
     ["actions/setup-node", { sha: "49933ea5288caeca8642d1e84afbd3f7d6820020", version: "v4" }],
     ["actions/setup-python", { sha: "a26af69be951a213d495a4c3e4e4022e16d87065", version: "v5" }],
   ]);
+  const expectedPinsByWorkflow = new Map([
+    ["ci.yml", commonPins],
+    ["release.yml", commonPins],
+  ]);
 
   for (const workflowName of ["ci.yml", "release.yml"]) {
     const workflow = await readFile(join(repositoryRoot, ".github", "workflows", workflowName), "utf8");
-    const actionUses = [...workflow.matchAll(/^\s*- uses:\s+(actions\/[^@\s]+)@([^\s#]+)(?:\s+#\s*([^\r\n]+))?$/gm)];
+    const actionUses = [...workflow.matchAll(/^\s+-?\s*uses:\s+(actions\/[^@\s]+)@([^\s#]+)(?:\s+#\s*([^\r\n]+))?$/gm)];
+    const expectedPins = expectedPinsByWorkflow.get(workflowName);
     assert.deepEqual(actionUses.map((match) => match[1]).sort(), [...expectedPins.keys()].sort());
 
     for (const [, action, ref, comment] of actionUses) {
