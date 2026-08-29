@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { cp, chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join, win32 as windowsPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyClaudeManual as applyClaudeManualProduction,
@@ -17,6 +17,7 @@ const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
 const hangingAclChildPath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "windows-acl-hanging-child.mjs");
 const windowsTestSid = "S-1-5-21-1-2-3-4";
+const windowsFixtureExecutable = "C:\\Windows\\System32\\fixture.exe";
 
 function verifiedWindowsAcl(sid = windowsTestSid, accessRules) {
   const ownerRule = {
@@ -42,7 +43,7 @@ function hermeticConfigFileOps(overrides) {
   const windowsDefaults = (overrides?.platform ?? process.platform) === "win32"
     ? {
         windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "C:\\Windows" },
-        windowsSystemPathResolver: async () => ({ executable: process.execPath, prefixArgs: [] }),
+        windowsSystemPathResolver: async () => ({ executable: windowsFixtureExecutable, prefixArgs: [] }),
         processRunner: async () => verifiedWindowsAcl(),
       }
     : {};
@@ -652,7 +653,7 @@ test("Claude config validates a fully-qualified Windows ACL command and its veri
   await withProfile(async ({ profileDir, helperSourcePath }) => {
     const token = runtimeSentinel("k");
     const calls = [];
-    const systemPath = process.execPath;
+    const systemPath = windowsFixtureExecutable;
     await applyClaudeManual({
       profileDir,
       token,
@@ -666,7 +667,7 @@ test("Claude config validates a fully-qualified Windows ACL command and its veri
           assert.equal(options.shell, false);
           assert.equal(options.timeoutMs, 3_000);
           assert.equal(command, systemPath);
-          assert.equal(isAbsolute(command), true);
+          assert.equal(windowsPath.isAbsolute(command), true);
           assert.equal(args.some((argument) => String(argument).includes(token)), false);
           return verifiedWindowsAcl();
         },
@@ -694,7 +695,7 @@ test("Claude config fails closed before bearer write when a successful Windows A
         canonicalOrigin,
         configFileOps: {
           platform: "win32",
-          windowsSystemPathResolver: async () => ({ executable: process.execPath, prefixArgs: [] }),
+          windowsSystemPathResolver: async () => ({ executable: windowsFixtureExecutable, prefixArgs: [] }),
           processRunner: async () => verifiedWindowsAcl(windowsTestSid, [
             {
               sid: windowsTestSid,
@@ -763,7 +764,11 @@ test("Claude config rejects inconsistent Windows system roots before the bearer 
   });
 });
 
-test("Claude config reaps a real timed-out Windows ACL child before staging cleanup when its descendant has ignored stdio", async () => {
+test("Claude config reaps a real timed-out Windows ACL child before staging cleanup when its descendant has ignored stdio", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("real Windows process-tree termination is only meaningful on Windows");
+    return;
+  }
   await withProfile(async ({ root, profileDir, helperSourcePath, configPath }) => {
     const original = await readFile(configPath);
     const releaseMarker = join(root, "acl-child-released");
@@ -810,7 +815,7 @@ test("Claude rollback preserves the Windows ACL runner and system-path seam", as
   await withProfile(async ({ profileDir, helperSourcePath, configPath }) => {
     const original = await readFile(configPath);
     const calls = [];
-    const systemPath = process.execPath;
+    const systemPath = windowsFixtureExecutable;
     await assert.rejects(
       applyClaudeManual({
         profileDir,
