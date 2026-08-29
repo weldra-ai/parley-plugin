@@ -33,11 +33,13 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF#refs/tags/}"
           version="$(node --input-type=module -e 'import fs from "node:fs"; console.log(JSON.parse(fs.readFileSync("package.json", "utf8")).version)')"
+          candidate_revision="$(node --input-type=module -e 'import fs from "node:fs"; const value = JSON.parse(fs.readFileSync("package.json", "utf8")).releaseCandidate; if (!Number.isSafeInteger(value) || value < 1) process.exit(1); console.log(value)')"
+          candidate_tag="candidate/v${version}-r${candidate_revision}"
           case "${tag}" in
-            "candidate/v${version}") release_mode="candidate" ;;
+            "${candidate_tag}") release_mode="candidate" ;;
             "v${version}") release_mode="publish" ;;
             *)
-              echo "Tag must be candidate/v${version} or v${version}."
+              echo "Tag must be ${candidate_tag} or v${version}."
               exit 1
               ;;
           esac
@@ -66,7 +68,6 @@ jobs:
           test "${expected_fingerprint}" = "${actual_fingerprint}"
           git verify-tag "${tag}" >/dev/null 2>&1
           if [ "${release_mode}" = "publish" ]; then
-            candidate_tag="candidate/v${version}"
             git cat-file -e "${candidate_tag}^{tag}"
             git verify-tag "${candidate_tag}" >/dev/null 2>&1
             candidate_commit="$(git rev-parse "${candidate_tag}^{commit}")"
@@ -98,7 +99,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          candidate_tag="candidate/${GITHUB_REF_NAME}"
+          candidate_revision="$(node --input-type=module -e 'import fs from "node:fs"; const value = JSON.parse(fs.readFileSync("package.json", "utf8")).releaseCandidate; if (!Number.isSafeInteger(value) || value < 1) process.exit(1); console.log(value)')"
+          candidate_tag="candidate/${GITHUB_REF_NAME}-r${candidate_revision}"
           test "$(gh release view "${candidate_tag}" --json isDraft --jq '.isDraft')" = "true"
           candidate_dir="$(mktemp -d)"
           trap 'rm -rf "${candidate_dir}"' EXIT

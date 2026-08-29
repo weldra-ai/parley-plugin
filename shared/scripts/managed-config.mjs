@@ -1359,12 +1359,13 @@ async function codexHostValidationInvocation(environment, platform, hostExecutab
     return {
       executable: windowsPath.join(systemRoot, "System32", "cmd.exe"),
       args: ["/d", "/q", "/v:off", "/s", "/c", `""${codexExecutable}" mcp list"`],
+      windowsVerbatimArguments: true,
     };
   }
   return { executable: codexExecutable, args: ["mcp", "list"] };
 }
 
-function defaultCodexHostRunner({ executable, args, environment, timeoutMs }) {
+function defaultCodexHostRunner({ executable, args, environment, timeoutMs, windowsVerbatimArguments = false }) {
   return new Promise((resolveResult) => {
     let child;
     let settled = false;
@@ -1394,6 +1395,7 @@ function defaultCodexHostRunner({ executable, args, environment, timeoutMs }) {
         env: environment,
         shell: false,
         windowsHide: true,
+        windowsVerbatimArguments,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {

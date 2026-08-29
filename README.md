@@ -63,7 +63,7 @@ rollback gates.
 
 ## Candidate and release signing
 
-The release workflow accepts only an annotated `candidate/v${package.version}` or `v${package.version}` tag signed by the configured public key. A candidate tag builds the exact release artifacts and stores them in an unpublished draft GitHub Release. The final tag must point to the same commit as its signed candidate tag; the workflow rebuilds that commit, requires a byte-for-byte match with the draft assets, and publishes those candidate assets.
+The release workflow accepts only an annotated `candidate/v${package.version}-r${package.releaseCandidate}` or `v${package.version}` tag signed by the configured public key. Incrementing `package.releaseCandidate` preserves rejected immutable candidates without changing the eventual public package version. A candidate tag builds the exact release artifacts and stores them in an unpublished draft GitHub Release. The final tag must point to the same commit as its signed candidate tag; the workflow rebuilds that commit, requires a byte-for-byte match with the draft assets, and publishes those candidate assets.
 
 Before creating either tag, an active repository tag ruleset with no bypass actors must prevent updates and deletions for `candidate/v*` and `v*`. The draft is visible to users with push access, but it is not a published release or native marketplace listing.
 
