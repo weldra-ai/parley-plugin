@@ -587,6 +587,16 @@ test("workflows do not ask setup-node to cache pnpm before Corepack installs it"
   }
 });
 
+test("workflows install the pinned pnpm with npm before invoking pnpm", async () => {
+  for (const workflowName of ["ci.yml", "release.yml"]) {
+    const workflow = await readFile(join(repositoryRoot, ".github", "workflows", workflowName), "utf8");
+    const bootstrap = "npm install --global pnpm@11.6.0";
+    assert.match(workflow, new RegExp(bootstrap.replaceAll(".", "\\.")), workflowName);
+    assert.ok(workflow.indexOf(bootstrap) < workflow.indexOf("pnpm install"), workflowName);
+    assert.doesNotMatch(workflow, /corepack prepare/, workflowName);
+  }
+});
+
 test("release imports and constrains the configured signer before verifying the exact tag", async () => {
   const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
   const readme = await readFile(join(repositoryRoot, "README.md"), "utf8");
