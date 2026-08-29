@@ -309,9 +309,9 @@ test("Claude helper selects dual-mode roots and emits only proven spaces", async
     const nonRepository = join(root, "not-a-repository");
     await mkdir(nonRepository);
 
-    assert.equal(selectProjectRoot(originRepo, root, helperPath), await realpath(originRepo));
+    assert.equal(await realpath(selectProjectRoot(originRepo, root, helperPath)), await realpath(originRepo));
     assert.equal(
-      selectProjectRoot("${CLAUDE_PROJECT_DIR}", originRepo, helperPath),
+      await realpath(selectProjectRoot("${CLAUDE_PROJECT_DIR}", originRepo, helperPath)),
       await realpath(originRepo),
     );
     assert.equal(selectProjectRoot("${CLAUDE_PROJECT_DIR}", claudeRoot, helperPath), null);

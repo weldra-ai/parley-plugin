@@ -1269,13 +1269,13 @@ function codexCandidateForManual(text, classification, { canonicalOrigin, token,
   throw new Error("The selected Codex profile contains an unowned Parley MCP configuration. Review or remove that entry, then retry.");
 }
 
-async function writeCodexConfig(path, bytes) {
-  await atomicWrite(path, bytes, { sensitive: true });
+async function writeCodexConfig(path, bytes, { configFileOps } = {}) {
+  await atomicWrite(path, bytes, configWriteOptions(configFileOps));
 }
 
-async function restoreCodexConfig(path, original) {
+async function restoreCodexConfig(path, original, { configFileOps } = {}) {
   if (original.exists) {
-    await writeCodexConfig(path, original.bytes);
+    await writeCodexConfig(path, original.bytes, { configFileOps: rollbackConfigFileOps(configFileOps) });
   } else {
     await rm(path, { force: true });
   }
@@ -1395,7 +1395,13 @@ export async function validateCodexHostProfile({
   }
 }
 
-async function commitCodexConfig(paths, original, candidate, canonicalOrigin, { expectedKind, hostValidator } = {}) {
+async function commitCodexConfig(
+  paths,
+  original,
+  candidate,
+  canonicalOrigin,
+  { expectedKind, hostValidator, configFileOps } = {},
+) {
   const candidateBytes = candidate === null ? null : Buffer.from(candidate, "utf8");
   if (candidateBytes !== null && original.exists && original.bytes.equals(candidateBytes)) {
     const verified = decodeUtf8(await readRegularFile(paths.configPath, "Codex profile"), "Codex profile");
@@ -1409,7 +1415,7 @@ async function commitCodexConfig(paths, original, candidate, canonicalOrigin, { 
     if (candidateBytes === null) {
       await rm(paths.configPath, { force: true });
     } else {
-      await writeCodexConfig(paths.configPath, candidateBytes);
+      await writeCodexConfig(paths.configPath, candidateBytes, { configFileOps });
     }
     const current = await snapshot(paths.configPath);
     const kind = current.exists
@@ -1421,7 +1427,7 @@ async function commitCodexConfig(paths, original, candidate, canonicalOrigin, { 
     await hostValidator({ configPath: paths.configPath, profileDir: paths.directory });
   } catch (error) {
     try {
-      await restoreCodexConfig(paths.configPath, original);
+      await restoreCodexConfig(paths.configPath, original, { configFileOps });
     } catch {
       throw new Error(UNSAFE_CODEX_ROLLBACK_MESSAGE);
     }
@@ -1429,7 +1435,13 @@ async function commitCodexConfig(paths, original, candidate, canonicalOrigin, { 
   }
 }
 
-export async function applyCodexManual({ profileDir, token, canonicalOrigin, hostValidator = validateCodexHostProfile } = {}) {
+export async function applyCodexManual({
+  profileDir,
+  token,
+  canonicalOrigin,
+  hostValidator = validateCodexHostProfile,
+  configFileOps,
+} = {}) {
   assertToken(token);
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
     throw new Error("Codex manual override requires the canonical HTTPS MCP origin.");
@@ -1449,11 +1461,17 @@ export async function applyCodexManual({ profileDir, token, canonicalOrigin, hos
   await commitCodexConfig(paths, original, candidate, canonicalOrigin, {
     expectedKind: "managed",
     hostValidator,
+    configFileOps,
   });
   return paths;
 }
 
-export async function switchCodexOAuth({ profileDir, canonicalOrigin, hostValidator = validateCodexHostProfile } = {}) {
+export async function switchCodexOAuth({
+  profileDir,
+  canonicalOrigin,
+  hostValidator = validateCodexHostProfile,
+  configFileOps,
+} = {}) {
   if (typeof canonicalOrigin !== "string" || !canonicalOrigin.startsWith("https://")) {
     throw new Error("Codex OAuth switch requires the canonical HTTPS MCP origin.");
   }
@@ -1477,6 +1495,7 @@ export async function switchCodexOAuth({ profileDir, canonicalOrigin, hostValida
   await commitCodexConfig(paths, original, classification.originalWasAbsent && candidate.length === 0 ? null : candidate, canonicalOrigin, {
     expectedKind: "absent",
     hostValidator,
+    configFileOps,
   });
   return paths;
 }

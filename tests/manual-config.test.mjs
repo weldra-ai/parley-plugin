@@ -5,10 +5,58 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as manager from "../shared/scripts/managed-config.mjs";
+import * as managerProduction from "../shared/scripts/managed-config.mjs";
 
 const canonicalOrigin = "https://parley.weldra.dev/mcp";
 const managerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "shared", "scripts", "managed-config.mjs");
+const windowsTestSid = "S-1-5-21-1-2-3-4";
+const windowsFixtureExecutable = "C:\\Windows\\System32\\fixture.exe";
+
+function verifiedWindowsAcl() {
+  return {
+    code: 0,
+    stdout: Buffer.from(`${JSON.stringify({
+      currentUserSid: windowsTestSid,
+      daclProtected: true,
+      accessRules: [{
+        sid: windowsTestSid,
+        type: "Allow",
+        rights: 2_032_127,
+        inherited: false,
+        inheritance: 0,
+        propagation: 0,
+      }],
+    })}\n`),
+    stderr: Buffer.alloc(0),
+  };
+}
+
+function hermeticConfigFileOps(overrides) {
+  const windowsDefaults = (overrides?.platform ?? process.platform) === "win32"
+    ? {
+        windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "C:\\Windows" },
+        windowsSystemPathResolver: async () => ({ executable: windowsFixtureExecutable, prefixArgs: [] }),
+        processRunner: async () => verifiedWindowsAcl(),
+      }
+    : {};
+  return { ...windowsDefaults, ...(overrides ?? {}) };
+}
+
+const manager = {
+  ...managerProduction,
+  applyCodexManual(options) {
+    return managerProduction.applyCodexManual({
+      ...options,
+      configFileOps: hermeticConfigFileOps(options?.configFileOps),
+    });
+  },
+  switchCodexOAuth(options) {
+    return managerProduction.switchCodexOAuth({
+      ...options,
+      configFileOps: hermeticConfigFileOps(options?.configFileOps),
+    });
+  },
+};
 
 async function canonicalTemporaryDirectory(prefix) {
   return realpath(await mkdtemp(join(tmpdir(), prefix)));
@@ -322,6 +370,35 @@ test("Codex host validation receives only the exact selected CODEX_HOME and stat
   });
 });
 
+test("Codex rollback preserves the Windows ACL runner and system-path seam", async () => {
+  await withCodexProfile(async ({ profileDir, configPath, initialConfig }) => {
+    const calls = [];
+    await assert.rejects(
+      manager.applyCodexManual({
+        profileDir,
+        token: runtimeSentinel("w"),
+        canonicalOrigin,
+        hostValidator: async () => {
+          throw new Error("synthetic host validation failure");
+        },
+        configFileOps: {
+          platform: "win32",
+          windowsEnvironment: { SystemRoot: "C:\\Windows", windir: "C:\\Windows" },
+          windowsSystemPathResolver: async () => ({ executable: windowsFixtureExecutable, prefixArgs: [] }),
+          processRunner: async (command) => {
+            assert.equal(command, windowsFixtureExecutable);
+            calls.push(command);
+            return verifiedWindowsAcl();
+          },
+        },
+      }),
+      /synthetic host validation failure/i,
+    );
+    assert.deepEqual(calls, [windowsFixtureExecutable, windowsFixtureExecutable]);
+    assert.deepEqual(await readFile(configPath), Buffer.from(initialConfig));
+  });
+});
+
 test("Codex CLI preserves the unsafe rollback remedy without exposing nested causes", () => {
   assert.equal(typeof manager.publicCliError, "function");
   const remedy = "Parley could not safely restore the selected Codex profile after a failed change. Check config.toml before retrying.";
@@ -336,7 +413,11 @@ test("Codex CLI preserves the unsafe rollback remedy without exposing nested cau
   );
 });
 
-test("Codex CLI reads a manual token only from stdin and keeps it out of terminal output", async () => {
+test("Codex CLI reads a manual token only from stdin and keeps it out of terminal output", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("direct CLI mutation uses the real Windows ACL boundary; deterministic ACL behavior is covered separately");
+    return;
+  }
   const root = await canonicalTemporaryDirectory("parley-codex-managed-cli-");
   const profileDir = join(root, "profile");
   const token = runtimeSentinel("c");
