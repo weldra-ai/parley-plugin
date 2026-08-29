@@ -1,0 +1,22 @@
+{
+  "name": "@weldra-ai/parley-plugin-build",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "validate": "node scripts/validate.mjs",
+    "scan-secrets": "node scripts/scan-secrets.mjs",
+    "sync-marketplaces": "node scripts/sync-marketplaces.mjs",
+    "check-marketplaces": "node scripts/sync-marketplaces.mjs --check",
+    "prepare-release": "node scripts/prepare-release-assets.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.237",
+    "@google/gemini-cli": "0.56.0"
+  }
+}

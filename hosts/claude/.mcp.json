@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "parley": {
+      "type": "http",
+      "url": "https://parley.weldra.dev/mcp",
+      "headersHelper": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/space-headers.mjs\" \"${CLAUDE_PROJECT_DIR}\""
+    }
+  }
+}

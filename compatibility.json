@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "canonicalMcpOrigin": "https://parley.weldra.dev/mcp",
+  "lifecycleMode": "oauth",
+  "hosts": {
+    "codex": {
+      "testedVersions": ["0.148.0"],
+      "operatingSystems": ["windows"],
+      "authModes": ["oauth", "manual"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "Windows 0.148.0 validates the OAuth artifact and exact manual config.toml owner block; authenticated lifecycle hooks remain omitted pending credential and Git-root certification"
+      }
+    },
+    "claude": {
+      "testedVersions": ["2.1.193", "2.1.195", "2.1.237"],
+      "operatingSystems": ["windows", "macos", "linux"],
+      "authModes": ["oauth", "manual"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "2.1.193 transport-only certification uses the explicit-space fallback; 2.1.195 invokes headersHelper; 2.1.237 certifies OAuth and manual override routing"
+      }
+    },
+    "gemini": {
+      "testedVersions": ["0.56.0"],
+      "operatingSystems": ["windows"],
+      "authModes": ["oauth", "manual"],
+      "minimumSupport": {
+        "minimumVersion": null,
+        "enforcedBy": "omitting/disabling capability",
+        "capability": "host-specific lifecycle automation",
+        "certification": "Windows 0.56.0 validates one OAuth-enabled server with a sensitive recovery-only PARLEY_TOKEN; stored OAuth overrides manual and authenticated lifecycle hooks remain omitted"
+      }
+    }
+  }
+}
