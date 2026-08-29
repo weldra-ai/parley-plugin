@@ -50,7 +50,7 @@ These remain pending until independently completed and recorded:
   and read-only verification of the committed Codex and Claude catalogs from the exact candidate commit;
 - an active repository tag ruleset with no bypass actors that prevents updates and deletions for
   `candidate/v*` and `v*` before either tag is created;
-- an annotated, release-signer-signed `candidate/v0.1.0` tag on the exact candidate commit, followed by a
+- an annotated, release-signer-signed `candidate/v0.1.0-r2` tag on the exact candidate commit, followed by a
   successful `Release plugin artifacts` run; that run stores the checksummed artifacts in an unpublished draft
   GitHub Release visible to users with push access, not a published package or listing;
 - the exact compatibility declaration and retained candidate artifact checksums bound before clean-profile or

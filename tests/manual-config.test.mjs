@@ -405,6 +405,32 @@ test("Codex host validation resolves the Windows CLI before invoking the trusted
   });
 });
 
+test("Codex host validation executes a resolved Windows command shim", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const bin = await mkdtemp(join(tmpdir(), "parley-codex-validator-bin-"));
+  try {
+    const systemRoot = process.env.SystemRoot ?? process.env.windir;
+    assert.ok(systemRoot);
+    await writeFile(join(bin, "codex.cmd"), "@echo off\r\nexit /b 0\r\n");
+    await withCodexProfile(async ({ profileDir, configPath }) => {
+      await assert.doesNotReject(manager.validateCodexHostProfile({
+        profileDir,
+        configPath,
+        platform: "win32",
+        environment: {
+          SystemRoot: systemRoot,
+          windir: systemRoot,
+          PATH: bin,
+          PATHEXT: ".CMD",
+        },
+      }));
+    });
+  } finally {
+    await rm(bin, { recursive: true, force: true });
+  }
+});
+
 test("Codex PowerShell wrapper resolves Node outside the project before sending a token", async () => {
   const powershell = await readFile(join(repositoryRoot, "hosts", "codex", "scripts", "connect-manual.ps1"), "utf8");
   assert.match(powershell, /FileName\s*=\s*\$nodePath/i);

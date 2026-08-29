@@ -642,10 +642,14 @@ test("release publishes certified archives plus platform-selectable Gemini alias
 test("signed candidate tags retain exact release artifacts in an unpublished draft", async () => {
   const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
   const certification = await readFile(join(repositoryRoot, "docs", "CERTIFICATION.md"), "utf8");
+  const packageJson = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
 
+  assert.equal(packageJson.releaseCandidate, 2);
   assert.match(release, /- "candidate\/v\*"/);
   assert.match(release, /tag="\$\{GITHUB_REF#refs\/tags\/\}"/);
-  assert.match(release, /"candidate\/v\$\{version\}"\)/);
+  assert.match(release, /candidate_revision=/);
+  assert.match(release, /candidate_tag="candidate\/v\$\{version\}-r\$\{candidate_revision\}"/);
+  assert.match(release, /"\$\{candidate_tag\}"\) release_mode="candidate"/);
   assert.match(release, /"v\$\{version\}"\)/);
   assert.match(release, /^permissions:\s*\n\s+contents: write$/m);
   assert.match(release, /if: startsWith\(github\.ref, 'refs\/tags\/candidate\/'\)/);
@@ -653,7 +657,7 @@ test("signed candidate tags retain exact release artifacts in an unpublished dra
   assert.doesNotMatch(release, /actions\/upload-artifact/);
   assert.doesNotMatch(release, /actions\/download-artifact/);
   assert.equal(release.match(/gh release create/g)?.length, 2);
-  assert.match(certification, /candidate\/v0\.1\.0/);
+  assert.match(certification, /candidate\/v0\.1\.0-r2/);
   assert.match(certification, /unpublished draft\s+GitHub Release/i);
   assert.match(certification, /tag ruleset with no bypass actors/i);
   assert.match(certification, /prevents updates and deletions/i);
@@ -662,7 +666,7 @@ test("signed candidate tags retain exact release artifacts in an unpublished dra
 test("final release tag must bind the signed candidate commit", async () => {
   const release = await readFile(join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
 
-  assert.match(release, /candidate_tag="candidate\/v\$\{version\}"/);
+  assert.match(release, /candidate_tag="candidate\/v\$\{version\}-r\$\{candidate_revision\}"/);
   assert.match(release, /git cat-file -e "\$\{candidate_tag\}\^\{tag\}"/);
   assert.match(release, /git verify-tag "\$\{candidate_tag\}"/);
   assert.match(release, /git rev-parse "\$\{candidate_tag\}\^\{commit\}"/);
